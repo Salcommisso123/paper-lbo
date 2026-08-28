@@ -1,0 +1,19 @@
+{
+  "cik": 320193,
+  "taxonomy": "us-gaap",
+  "tag": "OperatingIncomeLoss",
+  "label": "Operating Income (Loss)",
+  "description": "Test fixture modeled on the real SEC XBRL companyconcept schema (data.sec.gov).",
+  "entityName": "Sample Corp",
+  "units": {
+    "USD": [
+      {"start": "2021-01-01", "end": "2021-03-31", "val": 500000000, "accn": "A", "fy": 2021, "fp": "Q1", "form": "10-Q", "filed": "2021-05-01"},
+      {"start": "2020-01-01", "end": "2020-12-31", "val": 1900000000, "accn": "B1", "fy": 2020, "fp": "FY", "form": "10-K", "filed": "2021-02-15"},
+      {"start": "2020-01-01", "end": "2020-12-31", "val": 1950000000, "accn": "B2", "fy": 2020, "fp": "FY", "form": "10-K/A", "filed": "2021-06-01"},
+      {"start": "2022-01-01", "end": "2022-12-31", "val": 2200000000, "accn": "C1", "fy": 2022, "fp": "FY", "form": "10-K", "filed": "2023-02-10"},
+      {"start": "2023-01-01", "end": "2023-12-31", "val": 2500000000, "accn": "D1", "fy": 2023, "fp": "FY", "form": "10-K", "filed": "2024-02-12"},
+      {"start": "2024-01-01", "end": "2024-09-30", "val": 1700000000, "accn": "E1", "fy": 2024, "fp": "Q3", "form": "10-Q", "filed": "2024-11-01"},
+      {"start": "2024-01-01", "end": "2024-12-31", "val": 2650000000, "accn": "F1", "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-02-11"}
+    ]
+  }
+}
