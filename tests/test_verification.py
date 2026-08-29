@@ -311,3 +311,56 @@ def test_contracting_exit_multiple_is_not_an_upside():
     _add_run(s, 7.0, 6.0)
     assert agent_mod.base_run(s) is None
     assert agent_mod.upside_runs(s) == []
+
+
+# ---- revision budget ---------------------------------------------------------
+
+def _propose(state, entry, exit_):
+    return agent_mod.execute_tool("propose_and_run_lbo",
+        {"entry_ev_multiple": entry, "exit_ev_multiple": exit_, "hold_period_years": 5,
+         "leverage_multiple": 3.0, "revenue_growth_rate": 0.0}, state, None)
+
+
+def _priced_state():
+    from edgar import CompanyFinancials, FiscalYearFinancials
+    s = agent_mod.AgentState()
+    s.ltm_revenue, s.ltm_ebitda = LTM_REV, LTM_EBITDA
+    s.company = CompanyFinancials(ticker="SHOE", cik="1", company_name="SHOE",
+        years=[FiscalYearFinancials(fy=2025, revenue=LTM_REV, ebitda=LTM_EBITDA)])
+    return s
+
+
+def test_base_case_allows_exactly_one_revision():
+    """
+    The prompt said 'rerun ONCE' and a real run called the engine four times. Each
+    extra cycle is output tokens at 5x the input rate, so the cap is enforced.
+    """
+    s = _priced_state()
+    assert "error" not in _propose(s, 6.5, 6.5)      # initial
+    assert "error" not in _propose(s, 5.5, 5.5)      # the one allowed revision
+    refused = _propose(s, 5.0, 5.0)                  # a third base case
+    assert "error" in refused and "budget spent" in refused["error"]
+    assert len(s.runs) == 2                          # the refused run was never recorded
+
+
+def test_one_upside_run_is_still_allowed_after_the_base_budget():
+    s = _priced_state()
+    _propose(s, 6.5, 6.5); _propose(s, 5.5, 5.5)
+    assert "error" not in _propose(s, 5.5, 7.0)      # the labelled upside case
+    assert "error" in _propose(s, 5.0, 8.0)          # but only one
+    assert len(agent_mod.upside_runs(s)) == 1
+
+
+def test_budget_refusal_leaves_the_run_usable():
+    """A refusal must not strand the agent — the prior result still writes a workbook."""
+    s = _priced_state()
+    _propose(s, 6.5, 6.5); _propose(s, 5.5, 5.5); _propose(s, 5.0, 5.0)
+    assert s.result is not None
+    assert agent_mod.base_run(s)["assumptions"].entry_ev_multiple == 5.5
+
+
+def test_refusal_tells_the_agent_what_to_do_instead():
+    s = _priced_state()
+    _propose(s, 6.5, 6.5); _propose(s, 5.5, 5.5)
+    refused = _propose(s, 5.0, 5.0)
+    assert "legitimate finding" in refused["guidance"]

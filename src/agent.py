@@ -53,6 +53,13 @@ from verify import verify_financials  # noqa: E402
 # for the polished version you send to a recruiter. See docs/COST_CONTROL.md.
 MODEL = os.environ.get("LBO_AGENT_MODEL", "claude-haiku-4-5")
 MAX_TOKENS = int(os.environ.get("LBO_AGENT_MAX_TOKENS", "3000"))
+# The prompt tells Claude to revise at most once. It doesn't always listen — one
+# measured run called propose_and_run_lbo four times — and each extra cycle is output
+# tokens at 5x the input rate, so the limit is enforced here rather than requested.
+# Budget: the base case plus ONE revision, plus at most one alternative-multiple run
+# (the optional upside case, which the memo labels separately).
+MAX_BASE_RUNS = int(os.environ.get("LBO_AGENT_MAX_BASE_RUNS", "2"))
+MAX_ALT_RUNS = int(os.environ.get("LBO_AGENT_MAX_ALT_RUNS", "1"))
 MAX_TURNS = int(os.environ.get("LBO_AGENT_MAX_TURNS", "12"))  # hard stop so a confused loop can't burn budget
 # Raised from 8 when verify_financials / get_industry_benchmarks / get_management_discussion
 # were added — a full run is now ~8 tool calls and 8 turns cut the memo off.
@@ -112,6 +119,8 @@ is the more defensible convention.
 4. Call propose_and_run_lbo with those assumptions.
 5. Sanity-check the result. If there are warnings (cash flow shortfall, negative equity) \
 or the IRR is outside a believable ~10-40% range, adjust ONE assumption and rerun ONCE. \
+This is enforced: propose_and_run_lbo accepts the base case twice and one \
+alternative-multiple run, then refuses. Plan the revision you actually want. \
 That adjustment must be to ENTRY MULTIPLE or LEVERAGE — never to the exit multiple. \
 Raising the exit multiple to rescue a return is the single easiest way to make a bad \
 deal look good, and it is exactly what a reader will check first. Don't iterate more \
@@ -420,6 +429,25 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
             return {"error": "No usable LTM financials yet — call get_company_financials first, "
                               "and check that a recent year has both revenue and EBITDA."}
         assumptions = _assumptions_from_tool_input(tool_input)
+
+        # Enforce the revision budget before spending anything on the run.
+        is_base = assumptions.exit_ev_multiple == assumptions.entry_ev_multiple
+        done_base = sum(1 for r in state.runs
+                        if r["assumptions"].exit_ev_multiple == r["assumptions"].entry_ev_multiple)
+        done_alt = len(state.runs) - done_base
+        if is_base and done_base >= MAX_BASE_RUNS:
+            return {"error": f"Base-case budget spent — you have already run it "
+                             f"{done_base} times (the initial case plus one revision).",
+                    "guidance": "Stop iterating. Use the result you already have and "
+                                "explain the tension in the memo instead of searching for "
+                                "assumptions that produce a better number. A base case that "
+                                "misses the hurdle is a legitimate finding — say so."}
+        if not is_base and done_alt >= MAX_ALT_RUNS:
+            return {"error": f"Alternative-multiple budget spent — {done_alt} already run.",
+                    "guidance": "The memo gets one clearly labelled upside case, not a "
+                                "search across exit multiples. The sensitivity grid already "
+                                "shows the full range — point at it instead."}
+
         try:
             result = run_lbo(state.ltm_revenue, state.ltm_ebitda, assumptions)
         except ValueError as e:

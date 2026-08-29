@@ -256,6 +256,20 @@ Measured on one real run, with and without it:
 
 65% off the input, 44% off the run. Every run prints its own cache hit rate.
 
+The second lever is revisions. The prompt said "rerun ONCE" and a measured run called
+the engine four times anyway, so the budget is now enforced in code rather than
+requested: the base case plus one revision, plus at most one alternative-multiple
+(upside) run, then `propose_and_run_lbo` refuses and tells the agent to explain the
+tension instead of hunting for better numbers. Together:
+
+| | Cost |
+| --- | --- |
+| Baseline — no caching, unbounded revisions | $0.148 |
+| \+ prompt caching | $0.083 |
+| **\+ revision budget** | **$0.061** |
+
+**59% cheaper**, with no change to the model or the output's substance.
+
 One catch worth knowing if you change models: the minimum cacheable prefix is
 model-dependent and **not** monotonic across generations — Haiku 4.5 needs 4096
 tokens, more than any other current model. The system prompt and tool schemas are
