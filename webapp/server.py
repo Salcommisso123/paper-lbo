@@ -117,12 +117,21 @@ def stream(ticker: str = "", replay: str = "", delay: float = 0.12):
     )
 
 
+# Prompt-cache multipliers: a read costs ~0.1x base input, a write ~1.25x (5-min TTL).
+CACHE_READ_MULT = 0.1
+CACHE_WRITE_MULT = 1.25
+
+
 def _estimate_cost(usage_event: dict):
     rate = PRICING.get(usage_event.get("model", ""))
     if not rate:
         return None
-    return round(usage_event["input_tokens"] * rate[0] / 1e6
-                 + usage_event["output_tokens"] * rate[1] / 1e6, 4)
+    inp, out = rate
+    return round(
+        usage_event["input_tokens"] * inp / 1e6
+        + usage_event.get("cache_read_tokens", 0) * inp * CACHE_READ_MULT / 1e6
+        + usage_event.get("cache_write_tokens", 0) * inp * CACHE_WRITE_MULT / 1e6
+        + usage_event["output_tokens"] * out / 1e6, 4)
 
 
 @app.get("/download/{filename}")

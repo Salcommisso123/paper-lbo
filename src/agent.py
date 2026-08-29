@@ -68,6 +68,9 @@ Workflow:
 1. Call get_company_financials for the ticker the user gave you.
 2. If EBITDA is missing, negative, or the data-quality flags say the data is bad, \
 tell the user plainly that this isn't a clean LBO candidate and stop — do not force a model.
+2a. verify_financials, get_industry_benchmarks and get_management_discussion do not \
+depend on each other — call all three in the SAME turn rather than one per turn. Every \
+extra turn re-sends the whole conversation, so batching them is materially cheaper.
 2b. Call verify_financials. It cross-checks the figures you are about to model and \
 resolves which PERIOD a fiscal-year label actually refers to. Treat its output as \
 mandatory memo content, not optional colour:
@@ -458,6 +461,11 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
     if name == "write_excel_and_memo":
         if state.result is None or state.company is None:
             return {"error": "Need a completed LBO run (propose_and_run_lbo) before writing the file."}
+        missing = [f for f in ("memo_text", "output_filename") if not tool_input.get(f)]
+        if missing:
+            return {"error": f"Missing required argument(s): {', '.join(missing)}.",
+                    "guidance": "Call write_excel_and_memo again with the full memo text and "
+                                "a filename like TICKER_LBO_Model.xlsx."}
 
         # Deterministic check that every dollar figure in the prose traces to a tool
         # result AND sits next to the right label. Blocks the write once so Claude can
@@ -589,18 +597,37 @@ def iter_agent_events(ticker: str, out_dir: Path = Path("output")):
 
     total_input_tokens = 0
     total_output_tokens = 0
+    total_cache_write = 0
+    total_cache_read = 0
     hit_cap = True
 
     for turn in range(MAX_TURNS):
+        # Prompt caching. This loop re-sends the whole conversation every turn, so by
+        # the last turn the same system prompt, tool schemas and early tool results have
+        # been paid for ~9 times — re-sending, not the payloads, is what a run costs.
+        #
+        # Top-level cache_control auto-places the breakpoint on the last cacheable block,
+        # which here is the newest tool result. Each turn therefore reads the previous
+        # turn's prefix at ~0.1x and writes only the delta at 1.25x.
+        #
+        # Note the model matters: Haiku 4.5 needs a 4096-token prefix before anything
+        # caches at all (the highest minimum of any current model — it is NOT monotonic
+        # across generations). System + tools is only ~3K, so marking those alone would
+        # silently cache nothing. Placing the breakpoint in the messages clears the
+        # minimum from roughly the third turn on, which is where the tokens actually are.
+        # 5-minute TTL is right: turns are seconds apart, and a read refreshes the timer.
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
             tools=TOOLS,
             messages=messages,
+            cache_control={"type": "ephemeral"},
         )
         total_input_tokens += response.usage.input_tokens
         total_output_tokens += response.usage.output_tokens
+        total_cache_write += getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+        total_cache_read += getattr(response.usage, "cache_read_input_tokens", 0) or 0
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -616,7 +643,14 @@ def iter_agent_events(ticker: str, out_dir: Path = Path("output")):
         tool_results = []
         for tu in tool_uses:
             yield {"type": "tool_call", "name": tu.name, "input": tu.input}
-            result = execute_tool(tu.name, tu.input, state, out_dir)
+            try:
+                result = execute_tool(tu.name, tu.input, state, out_dir)
+            except Exception as e:
+                # Hand the failure back as a tool result so Claude can correct itself.
+                # Raising here would abandon a run that has already been paid for.
+                result = {"error": f"{type(e).__name__}: {e}",
+                          "guidance": "That tool call failed. Check the arguments against "
+                                      "the tool schema and try again."}
             # Every number any tool returned becomes the traceable set the memo audit
             # checks against. Collected here so it covers all tools automatically.
             if tu.name != "write_excel_and_memo":
@@ -632,7 +666,8 @@ def iter_agent_events(ticker: str, out_dir: Path = Path("output")):
     if hit_cap:
         yield {"type": "cap", "max_turns": MAX_TURNS}
     yield {"type": "usage", "input_tokens": total_input_tokens,
-           "output_tokens": total_output_tokens, "model": MODEL}
+           "output_tokens": total_output_tokens, "model": MODEL,
+           "cache_write_tokens": total_cache_write, "cache_read_tokens": total_cache_read}
     yield {"type": "done", "summary": _final_summary(state)}
 
 
@@ -649,6 +684,14 @@ def run_agent(ticker: str, out_dir: Path = Path("output")) -> None:
         elif t == "usage":
             print(f"\n--- usage this run: {ev['input_tokens']} input tokens, "
                   f"{ev['output_tokens']} output tokens ---")
+            read, write = ev.get("cache_read_tokens", 0), ev.get("cache_write_tokens", 0)
+            if read or write:
+                # Cache reads bill at ~0.1x input, so this is most of the saving.
+                billed = ev["input_tokens"] + write * 1.25 + read * 0.1
+                naive = ev["input_tokens"] + write + read
+                print(f"    prompt cache: {read:,} read + {write:,} written — "
+                      f"billed like {billed:,.0f} input tokens instead of {naive:,.0f} "
+                      f"({100 * (1 - billed / naive):.0f}% less)" if naive else "")
             print("Check current per-token pricing for your configured model at "
                   "https://docs.claude.com/en/docs/about-claude/models and set a spend "
                   "limit in the Anthropic Console so a run can never surprise-bill you.")

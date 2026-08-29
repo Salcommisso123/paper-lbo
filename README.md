@@ -236,20 +236,37 @@ labeled as illustrative, not a real filer.
 SEC EDGAR, the Damodaran datasets and SEC full-text search are all free. The
 only real cost is Claude API usage. Measured on Claude Haiku 4.5, the default:
 
-| Run | Input / output tokens | Cost |
+| Run | Cost |
+| --- | --- |
+| Full SHOE model | **~$0.06 – $0.09** |
+| FLWS refusal (stops at bad data) | ~$0.007 |
+
+The agent loop re-sends the whole conversation every turn, so by the last turn the
+same system prompt, tool schemas and early tool results have been paid for ~9 times.
+**Re-sending, not the payloads, is what a run costs** — the tool results themselves
+total only ~2.4K tokens. [Prompt caching](https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
+is therefore the single biggest lever, and it's on by default.
+
+Measured on one real run, with and without it:
+
+| | Input billed | Total |
 | --- | --- | --- |
-| Full SHOE model | 53K–93K / 4.0K–11.9K | **$0.07 – $0.15** |
-| FLWS refusal (stops at bad data) | 4.6K / 0.5K | $0.007 |
+| Without caching | 99,561 tokens | $0.148 |
+| **With caching** | **34,931 equivalent** | **$0.083** |
 
-Budget **~$0.10 for a typical complete run**. That is up from ~$0.035 before the
-verification tooling was added — cross-checking the figures, pulling sector
-benchmarks and quoting the 10-K MD&A roughly tripled token usage, and the MD&A
-excerpts are the largest single contributor. The top of the range is a run where
-the memo figure audit rejected the first draft and the agent rewrote it: correctness
-costs an extra turn, on purpose.
+65% off the input, 44% off the run. Every run prints its own cache hit rate.
 
-Sonnet 5 is roughly 3x Haiku's rate on the same token counts, so ~$0.30/run —
-worth it for the version you actually send to a recruiter, not for iterating.
+One catch worth knowing if you change models: the minimum cacheable prefix is
+model-dependent and **not** monotonic across generations — Haiku 4.5 needs 4096
+tokens, more than any other current model. The system prompt and tool schemas are
+only ~3K, so marking *those* would silently cache nothing. The breakpoint goes in
+the messages instead, which clears the minimum from about the third turn on.
+
+With input largely handled, **output tokens are now ~58% of the bill**. The levers
+left are the memo's length and how many times the agent revises.
+
+Sonnet 5 is ~2x Haiku's rate — worth it for the version you actually send to a
+recruiter, not for iterating.
 
 The guardrails: a hard turn cap (`LBO_AGENT_MAX_TURNS`, default 12) so a confused
 loop can't spiral, a per-response cap (`LBO_AGENT_MAX_TOKENS`), and every run
