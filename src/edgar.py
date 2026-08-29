@@ -64,6 +64,11 @@ TAG_CANDIDATES = {
     "long_term_debt_noncurrent": ["LongTermDebtNoncurrent"],
     "long_term_debt_current": ["LongTermDebtCurrent"],
     "short_term_borrowings": ["ShortTermBorrowings", "DebtCurrent"],
+    # Opening balance-sheet items — needed to build a balance sheet that ties, not just
+    # an income statement and a cash flow.
+    "ppe_net": ["PropertyPlantAndEquipmentNet"],
+    "current_assets": ["AssetsCurrent"],
+    "current_liabilities": ["LiabilitiesCurrent"],
     "capex": [
         "PaymentsToAcquirePropertyPlantAndEquipment",
         "PaymentsForCapitalImprovements",
@@ -225,6 +230,9 @@ class FiscalYearFinancials:
     cash: Optional[float] = None
     total_debt: Optional[float] = None
     capex: Optional[float] = None
+    ppe_net: Optional[float] = None
+    current_assets: Optional[float] = None
+    current_liabilities: Optional[float] = None
     flags: list[str] = field(default_factory=list)
 
 
@@ -241,6 +249,18 @@ class CompanyFinancials:
             if fyd.revenue and fyd.ebitda is not None:
                 return fyd
         return None
+
+
+def non_cash_nwc(year: "FiscalYearFinancials") -> Optional[float]:
+    """
+    Net working capital excluding cash: (current assets - cash) - current liabilities.
+
+    Cash is excluded because an LBO is priced cash-free/debt-free and the model tracks
+    cash separately on the balance sheet; leaving it in would double-count it.
+    """
+    if year.current_assets is None or year.current_liabilities is None:
+        return None
+    return (year.current_assets - (year.cash or 0.0)) - year.current_liabilities
 
 
 def assess_modelability(company: CompanyFinancials) -> dict:
@@ -308,6 +328,9 @@ def fetch_company_financials(ticker: str, lookback_years: int = 5) -> CompanyFin
         fyd.net_income = series["net_income"].get(fy)
         fyd.cash = series["cash"].get(fy)
         fyd.capex = series["capex"].get(fy)
+        fyd.ppe_net = series["ppe_net"].get(fy)
+        fyd.current_assets = series["current_assets"].get(fy)
+        fyd.current_liabilities = series["current_liabilities"].get(fy)
 
         ltd_nc = series["long_term_debt_noncurrent"].get(fy, 0) or 0
         ltd_c = series["long_term_debt_current"].get(fy, 0) or 0

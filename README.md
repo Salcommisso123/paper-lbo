@@ -93,6 +93,33 @@ which is plain, tested Python. That's what makes the output auditable
 instead of "an LLM said so" — see `tests/test_lbo_engine.py`, which checks
 the engine against a hand-calculated example.
 
+## The workbook is a live model, not a printout
+
+`excel_writer.py` writes **formulas, not the engine's numbers**. Open the file, change
+the entry multiple in the blue Assumptions cell, and the debt schedule, the three
+statements and the returns all move:
+
+| Entry | Leverage | MOIC | IRR | Sponsor equity |
+| --- | --- | --- | --- | --- |
+| 5.0x | 4.5x | 2.22x | 17.3% | $69.8M |
+| 6.0x | 4.5x | 0.89x | −2.2% | $172.9M |
+| 5.0x | 3.0x | 1.67x | 10.8% | $218.4M |
+
+Eight tabs — Assumptions, Sources & Uses, Debt Schedule, Income Statement, Cash Flow,
+Balance Sheet, Returns, Investment Memo — with the standard colour convention: **blue =
+hardcoded input, black = formula on this sheet, green = links to another sheet**. The
+colour is derived from each cell's own content, so a cell can't claim to be a formula
+while holding a hardcode.
+
+The balance sheet ties to zero every year, and interest is charged on beginning balances
+so nothing needs Excel's iterative calculation turned on.
+
+This also makes the workbook an **independent check on the engine**:
+`tests/test_excel_model.py` recalculates it with LibreOffice and asserts it reproduces
+`lbo_engine.py` to six significant figures. That test earned its keep immediately — it
+caught the debt sweep reading the cash-flow statement's NWC row instead of the free-cash-
+flow row one line below, which silently disabled the sweep whenever growth was zero.
+
 ## Grounding: what stops the memo from drifting off the data
 
 Three tools run before the memo is written, all free and key-less:
@@ -329,6 +356,8 @@ tests/
   test_edgar_parser.py  SEC JSON parsing checked against a saved fixture
   test_verification.py  fiscal-year labelling, industry matching, MD&A parsing,
                         memo figure audit (incl. the exact audited bug)
+  test_excel_model.py   workbook structure, colour convention, and a LibreOffice
+                        recalculation checked against the engine
 examples/
   generate_demo.py      builds the sample workbook with no API key needed
 docs/

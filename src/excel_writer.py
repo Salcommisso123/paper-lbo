@@ -1,8 +1,32 @@
 """
-excel_writer.py — turns an LBOResult (from lbo_engine.py) into a formatted,
-multi-tab .xlsx workbook. This file only formats numbers that were already
-computed elsewhere — it does no math of its own beyond simple display
-transforms (e.g., rounding for display).
+excel_writer.py — writes the LBO as a LIVE Excel model, not a printout.
+
+WHY THIS IS FORMULA-DRIVEN
+--------------------------
+The first version of this file pasted the engine's numbers into cells. Every figure was
+correct, and the workbook was still the wrong artifact: change the entry multiple and
+nothing moved. A paper LBO exists to be flexed in front of someone, and "it's computed
+in Python" is a good engineering answer to a question nobody asked.
+
+So the engine's numbers are no longer written at all. The ASSUMPTIONS are written, and
+everything downstream is an Excel formula. Open the workbook, change 5.0x to 6.0x, and
+the debt schedule, the three statements and the returns all move. The engine and the
+workbook now agree because they implement the same arithmetic, which also means the
+workbook independently checks the engine — tests/test_excel_recalc.py recalculates it
+and compares.
+
+COLOUR CONVENTION (the standard one: blue input, black formula, green cross-sheet)
+---------------------------------------------------------------------------------
+Colour is derived from the cell's own content in `_put`, never passed in by hand — so a
+cell cannot claim to be a formula while holding a hardcode. That is the property the
+convention exists to give a reader, and hand-applied colours lose it on the first edit.
+
+NO CIRCULAR REFERENCES
+----------------------
+Interest is charged on BEGINNING balances, so the chain is a DAG:
+    debt beginning -> interest -> net income -> free cash flow -> sweep -> debt ending
+Average-balance interest would close that loop and force iterative calculation on, which
+is a footgun in a workbook someone else opens.
 """
 
 from __future__ import annotations
@@ -14,34 +38,72 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from edgar import CompanyFinancials
+from edgar import CompanyFinancials, non_cash_nwc
 from lbo_engine import LBOAssumptions, LBOResult
 
 NAVY = "1F3864"
-LIGHT_GRAY = "F2F2F2"
 WHITE = "FFFFFF"
-RED_FLAG = "FFC7CE"
+GREY = "808080"
 
+# The convention. Blue = you may type here; black = calculated here; green = it came
+# from another sheet.
+INPUT_BLUE = "0000FF"
+FORMULA_BLACK = "000000"
+LINK_GREEN = "008000"
+
+MONEY = "#,##0;(#,##0)"
+MULT = '0.00"x"'
+PCT = "0.0%"
+PCT2 = "0.00%"
+
+TITLE_FONT = Font(bold=True, size=14, color=NAVY)
+SUBTITLE_FONT = Font(italic=True, size=9, color=GREY)
 HEADER_FONT = Font(color=WHITE, bold=True, size=11)
 HEADER_FILL = PatternFill(fill_type="solid", fgColor=NAVY)
-TITLE_FONT = Font(bold=True, size=14, color=NAVY)
-SUBTITLE_FONT = Font(italic=True, size=9, color="808080")
-BOLD = Font(bold=True)
-THIN_BORDER = Border(bottom=Side(style="thin", color="BFBFBF"))
-BAND_FILL = PatternFill(fill_type="solid", fgColor=LIGHT_GRAY)
-
-USD0 = '#,##0;(#,##0)'
-USD1 = '#,##0.0;(#,##0.0)'
-PCT1 = '0.0%'
-MULT1 = '0.00"x"'
+SECTION_FONT = Font(bold=True, size=10, color=NAVY)
+TOTAL_BORDER = Border(top=Side(style="thin"), bottom=Side(style="double"))
+CHECK_OK = PatternFill(fill_type="solid", fgColor="C6EFCE")
 
 
-def _style_header_row(ws: Worksheet, row: int, ncols: int, start_col: int = 1):
-    for c in range(start_col, start_col + ncols):
-        cell = ws.cell(row=row, column=c)
-        cell.font = HEADER_FONT
-        cell.fill = HEADER_FILL
-        cell.alignment = Alignment(horizontal="center" if c > start_col else "left")
+def _put(ws: Worksheet, ref: str, value, fmt: str = MONEY, bold: bool = False,
+         indent: int = 0):
+    """
+    Write a cell and colour it by what it actually contains:
+      starts with '=' and mentions another sheet  -> green
+      starts with '='                             -> black
+      anything else (a hardcode)                  -> blue
+
+    Deriving the colour instead of accepting it as an argument is the point: the
+    convention stays true no matter how the sheet is later edited.
+    """
+    cell = ws[ref]
+    cell.value = value
+    if isinstance(value, str) and value.startswith("="):
+        colour = LINK_GREEN if "!" in value else FORMULA_BLACK
+        cell.number_format = fmt
+    elif isinstance(value, (int, float)):
+        colour = INPUT_BLUE
+        cell.number_format = fmt
+    else:
+        colour = FORMULA_BLACK
+    cell.font = Font(bold=bold, color=colour)
+    if indent:
+        cell.alignment = Alignment(indent=indent)
+    return cell
+
+
+def _label(ws: Worksheet, ref: str, text: str, bold: bool = False, indent: int = 0):
+    cell = ws[ref]
+    cell.value = text
+    cell.font = Font(bold=bold)
+    if indent:
+        cell.alignment = Alignment(indent=indent)
+    return cell
+
+
+def _section(ws: Worksheet, row: int, text: str):
+    cell = ws.cell(row=row, column=1, value=text)
+    cell.font = SECTION_FONT
 
 
 def _title(ws: Worksheet, text: str, subtitle: str = ""):
@@ -52,278 +114,424 @@ def _title(ws: Worksheet, text: str, subtitle: str = ""):
         ws["A2"].font = SUBTITLE_FONT
 
 
-def _autofit(ws: Worksheet, widths: dict[str, int]):
-    for col, w in widths.items():
-        ws.column_dimensions[col].width = w
+def _year_header(ws: Worksheet, row: int, years: int, first_col: int = 3,
+                 opening_label: Optional[str] = "At close"):
+    """Column headers: an optional opening column, then Year 1..N."""
+    if opening_label:
+        c = ws.cell(row=row, column=first_col - 1, value=opening_label)
+        c.font, c.fill = HEADER_FONT, HEADER_FILL
+        c.alignment = Alignment(horizontal="center")
+    for i in range(years):
+        c = ws.cell(row=row, column=first_col + i, value=f"Year {i + 1}")
+        c.font, c.fill = HEADER_FONT, HEADER_FILL
+        c.alignment = Alignment(horizontal="center")
 
 
-def _write_assumptions_sheet(ws: Worksheet, company: CompanyFinancials, ltm_revenue: float,
-                              ltm_ebitda: float, a: LBOAssumptions):
+def _widths(ws: Worksheet, first: int = 34, rest: int = 15, n: int = 8):
+    ws.column_dimensions["A"].width = first
+    for i in range(2, 2 + n):
+        ws.column_dimensions[get_column_letter(i)].width = rest
+
+
+# --------------------------------------------------------------------------------
+# Assumptions — the only sheet with hardcodes. Everything else points back here.
+# --------------------------------------------------------------------------------
+A = {  # row anchors on the Assumptions sheet, referenced by every other sheet
+    "revenue": 5, "ebitda": 6, "margin": 7, "ppe": 8, "nwc": 9, "cash": 10,
+    "entry": 12, "exit": 13, "leverage": 14, "hold": 15, "growth": 16,
+    "da": 17, "capex": 18, "nwc_pct": 19, "tax": 20,
+    "txn_fee": 21, "fin_fee": 22, "sweep": 23, "rollover": 24,
+    "sr_pct": 27, "sr_rate": 28, "sr_amort": 29, "sub_rate": 30,
+}
+ASM = "Assumptions"
+
+
+def _a(key: str) -> str:
+    """Absolute reference to an assumption cell, e.g. Assumptions!$B$12."""
+    return f"{ASM}!$B${A[key]}"
+
+
+def _write_assumptions(ws: Worksheet, company: CompanyFinancials, ltm_revenue: float,
+                       ltm_ebitda: float, a: LBOAssumptions):
     _title(ws, f"{company.company_name} ({company.ticker}) — LBO Assumptions",
-           f"CIK {company.cik} · SEC EDGAR (free, public data) · built by an autonomous Claude Code agent")
-    row = 4
-    ws.cell(row=row, column=1, value="LTM Financials (from SEC 10-K filings)").font = BOLD
-    row += 1
-    for label, val, fmt in [
-        ("LTM Revenue", ltm_revenue, USD0),
-        ("LTM EBITDA", ltm_ebitda, USD0),
-        ("LTM EBITDA Margin", (ltm_ebitda / ltm_revenue if ltm_revenue else 0), PCT1),
-    ]:
-        ws.cell(row=row, column=1, value=label)
-        c = ws.cell(row=row, column=2, value=val)
-        c.number_format = fmt
-        row += 1
+           f"CIK {company.cik} · SEC EDGAR. Blue cells are inputs — change them and the "
+           f"whole model recalculates.")
+    year = company.latest_complete_year()
+    opening_ppe = (year.ppe_net if year and year.ppe_net else 0.0)
+    opening_nwc = (non_cash_nwc(year) if year else None) or 0.0
 
-    if company.data_quality_flags:
-        row += 1
-        ws.cell(row=row, column=1, value="Data quality flags").font = BOLD
-        row += 1
-        for f in company.data_quality_flags:
-            ws.cell(row=row, column=1, value=f"⚠ {f}").fill = PatternFill(fill_type="solid", fgColor=RED_FLAG)
-            row += 1
+    _section(ws, 4, "LTM financials (from SEC 10-K filings)")
+    _label(ws, "A5", "LTM revenue", indent=1);        _put(ws, "B5", ltm_revenue)
+    _label(ws, "A6", "LTM EBITDA", indent=1);         _put(ws, "B6", ltm_ebitda)
+    _label(ws, "A7", "EBITDA margin", indent=1);      _put(ws, "B7", "=B6/B5", PCT)
+    _label(ws, "A8", "Opening PP&E, net", indent=1);  _put(ws, "B8", opening_ppe)
+    _label(ws, "A9", "Opening non-cash NWC", indent=1); _put(ws, "B9", opening_nwc)
+    # Cash-free/debt-free entry: the sponsor inherits no cash and builds it from retained
+    # FCF. An input rather than a hard zero, so a cash-funded deal can be modelled.
+    _label(ws, "A10", "Opening cash at close", indent=1); _put(ws, "B10", 0.0)
 
-    row += 1
-    ws.cell(row=row, column=1, value="Deal Assumptions").font = BOLD
-    row += 1
-    deal_rows = [
-        ("Entry EV / EBITDA multiple", a.entry_ev_multiple, MULT1),
-        ("Exit EV / EBITDA multiple", a.exit_ev_multiple, MULT1),
-        ("Hold period (years)", a.hold_period_years, '0'),
-        ("Total leverage (x EBITDA)", a.leverage_multiple, MULT1),
-        ("Revenue growth (annual)", a.revenue_growth_rate, PCT1),
-        ("EBITDA margin (held flat unless noted)", a.ebitda_margin, PCT1),
-        ("D&A (% of revenue)", a.da_pct_revenue, PCT1),
-        ("CapEx (% of revenue)", a.capex_pct_revenue, PCT1),
-        ("NWC change (% of revenue growth $)", a.nwc_pct_of_revenue_change, PCT1),
-        ("Cash tax rate", a.tax_rate, PCT1),
-        ("Transaction fees (% of EV)", a.transaction_fee_pct_of_ev, PCT1),
-        ("Financing fees (% of new debt)", a.financing_fee_pct_of_debt, PCT1),
-        ("Cash sweep %", a.cash_sweep_pct, PCT1),
-        ("Management rollover (% of equity value)", a.management_rollover_pct, PCT1),
+    _section(ws, 11, "Deal assumptions")
+    rows = [
+        ("entry", "Entry EV / EBITDA", a.entry_ev_multiple, MULT),
+        ("exit", "Exit EV / EBITDA", a.exit_ev_multiple, MULT),
+        ("leverage", "Total leverage (x EBITDA)", a.leverage_multiple, MULT),
+        ("hold", "Hold period (years)", a.hold_period_years, "0"),
+        ("growth", "Revenue growth (annual)", a.revenue_growth_rate, PCT),
+        ("da", "D&A (% of revenue)", a.da_pct_revenue, PCT),
+        ("capex", "Capex (% of revenue)", a.capex_pct_revenue, PCT),
+        ("nwc_pct", "NWC (% of revenue change)", a.nwc_pct_of_revenue_change, PCT),
+        ("tax", "Cash tax rate", a.tax_rate, PCT),
+        ("txn_fee", "Transaction fees (% of EV)", a.transaction_fee_pct_of_ev, PCT),
+        ("fin_fee", "Financing fees (% of debt)", a.financing_fee_pct_of_debt, PCT),
+        ("sweep", "Cash sweep (% of FCF)", a.cash_sweep_pct, PCT),
+        ("rollover", "Management rollover (% of equity)", a.management_rollover_pct, PCT),
     ]
-    for label, val, fmt in deal_rows:
-        ws.cell(row=row, column=1, value=label)
-        c = ws.cell(row=row, column=2, value=val)
-        c.number_format = fmt
-        row += 1
+    for key, text, value, fmt in rows:
+        _label(ws, f"A{A[key]}", text, indent=1)
+        _put(ws, f"B{A[key]}", value, fmt)
 
-    row += 1
-    ws.cell(row=row, column=1, value="Debt Structure").font = BOLD
-    row += 1
-    headers = ["Tranche", "% of Total Debt", "Interest Rate", "Mandatory Amort (%/yr of principal)", "Priority"]
-    for i, h in enumerate(headers, start=1):
-        ws.cell(row=row, column=i, value=h)
-    _style_header_row(ws, row, len(headers))
-    row += 1
-    for t in a.tranches:
-        ws.cell(row=row, column=1, value=t.name)
-        ws.cell(row=row, column=2, value=t.pct_of_total_debt).number_format = PCT1
-        ws.cell(row=row, column=3, value=t.interest_rate).number_format = PCT1
-        ws.cell(row=row, column=4, value=t.mandatory_amort_pct_of_principal).number_format = PCT1
-        ws.cell(row=row, column=5, value=t.priority)
-        row += 1
+    senior = a.tranches[0]
+    sub = a.tranches[1] if len(a.tranches) > 1 else None
+    _section(ws, 26, "Debt structure")
+    _label(ws, f"A{A['sr_pct']}", f"{senior.name} (% of debt)", indent=1)
+    _put(ws, f"B{A['sr_pct']}", senior.pct_of_total_debt, PCT)
+    _label(ws, f"A{A['sr_rate']}", f"{senior.name} interest rate", indent=1)
+    _put(ws, f"B{A['sr_rate']}", senior.interest_rate, PCT2)
+    _label(ws, f"A{A['sr_amort']}", "Mandatory amortisation (% of principal p.a.)", indent=1)
+    _put(ws, f"B{A['sr_amort']}", senior.mandatory_amort_pct_of_principal, PCT2)
+    _label(ws, f"A{A['sub_rate']}", f"{sub.name if sub else 'Subordinated'} interest rate", indent=1)
+    _put(ws, f"B{A['sub_rate']}", sub.interest_rate if sub else 0.0, PCT2)
 
-    _autofit(ws, {"A": 42, "B": 16, "C": 16, "D": 30, "E": 10})
+    ws["A32"] = ("Colour convention: blue = hardcoded input · black = formula on this "
+                 "sheet · green = links to another sheet.")
+    ws["A32"].font = SUBTITLE_FONT
+    _widths(ws, first=38, rest=16)
 
 
-def _write_sources_uses_sheet(ws: Worksheet, result: LBOResult):
-    _title(ws, "Sources & Uses")
-    su = result.sources_uses
-    row = 4
-    ws.cell(row=row, column=1, value="Uses").font = BOLD
-    ws.cell(row=row, column=3, value="Sources").font = BOLD
-    row += 1
-    uses = [
-        ("Purchase Enterprise Value", su.purchase_enterprise_value),
-        ("Transaction Fees", su.transaction_fees),
-        ("Financing Fees", su.financing_fees),
-    ]
-    sources = [
-        ("New Debt", su.total_new_debt),
-        ("Management Rollover Equity", su.management_rollover),
-        ("Sponsor Equity", su.sponsor_equity),
-    ]
-    start = row
-    for i, (label, val) in enumerate(uses):
-        ws.cell(row=start + i, column=1, value=label)
-        ws.cell(row=start + i, column=2, value=val).number_format = USD0
-    ws.cell(row=start + len(uses), column=1, value="Total Uses").font = BOLD
-    ws.cell(row=start + len(uses), column=2, value=su.total_uses).number_format = USD0
-    ws.cell(row=start + len(uses), column=2).font = BOLD
-
-    for i, (label, val) in enumerate(sources):
-        ws.cell(row=start + i, column=3, value=label)
-        ws.cell(row=start + i, column=4, value=val).number_format = USD0
-    ws.cell(row=start + len(sources), column=3, value="Total Sources").font = BOLD
-    ws.cell(row=start + len(sources), column=4, value=su.total_sources).number_format = USD0
-    ws.cell(row=start + len(sources), column=4).font = BOLD
-
-    check_row = start + max(len(uses), len(sources)) + 2
-    ws.cell(row=check_row, column=1, value="Check (Sources − Uses, should be 0):").font = BOLD
-    diff = round(su.total_sources - su.total_uses, 2)
-    dc = ws.cell(row=check_row, column=2, value=diff)
-    dc.number_format = USD0
-    dc.font = BOLD
-    if abs(diff) > 0.5:
-        dc.fill = PatternFill(fill_type="solid", fgColor=RED_FLAG)
-
-    _autofit(ws, {"A": 28, "B": 16, "C": 26, "D": 16})
+# --------------------------------------------------------------------------------
+SU = "Sources & Uses"
+SU_ROWS = {"ev": 5, "txn": 6, "fin": 7, "uses": 8,
+           "debt": 11, "roll": 12, "sponsor": 13, "sources": 14, "check": 16}
 
 
-def _write_projections_sheet(ws: Worksheet, result: LBOResult):
-    _title(ws, "Operating Model & Debt Paydown")
-    tranche_names = list(result.projections[0].tranche_ending_balances.keys()) if result.projections else []
-    headers = ["", "Entry"] + [f"Year {p.year}" for p in result.projections]
-    row_labels = [
-        ("Revenue", "revenue", USD0),
-        ("EBITDA", "ebitda", USD0),
-        ("EBITDA Margin", "ebitda_margin", PCT1),
-        ("D&A", "d_and_a", USD0),
-        ("EBIT", "ebit", USD0),
-        ("Interest Expense", "total_interest_expense", USD0),
-        ("Cash Taxes", "cash_taxes", USD0),
-        ("CapEx", "capex", USD0),
-        ("Increase in NWC", "nwc_change", USD0),
-        ("Levered FCF (pre-sweep)", "levered_free_cash_flow_pre_sweep", USD0),
-        ("Mandatory Amortization", "mandatory_amortization", USD0),
-        ("Cash Swept to Debt Paydown", "cash_swept", USD0),
-        ("Total Debt (ending)", "total_debt_ending", USD0),
-        ("Cash Balance (ending)", "cash_balance_ending", USD0),
-    ]
-
-    r = 4
-    for i, h in enumerate(headers, start=1):
-        ws.cell(row=r, column=i, value=h)
-    _style_header_row(ws, r, len(headers))
-    r += 1
-
-    for label, attr, fmt in row_labels:
-        ws.cell(row=r, column=1, value=label).font = BOLD
-        ws.cell(row=r, column=2, value=None)  # "Entry" column intentionally blank except revenue/EBITDA context
-        for j, p in enumerate(result.projections, start=3):
-            val = getattr(p, attr)
-            c = ws.cell(row=r, column=j, value=val)
-            c.number_format = fmt
-            if attr == "levered_free_cash_flow_pre_sweep" and val < 0:
-                c.fill = PatternFill(fill_type="solid", fgColor=RED_FLAG)
-        if r % 2 == 0:
-            for c in range(1, len(headers) + 1):
-                ws.cell(row=r, column=c).fill = BAND_FILL
-        r += 1
-
-    r += 1
-    ws.cell(row=r, column=1, value="Debt Balance by Tranche").font = BOLD
-    r += 1
-    for i, h in enumerate(headers, start=1):
-        ws.cell(row=r, column=i, value=h)
-    _style_header_row(ws, r, len(headers))
-    r += 1
-    for name in tranche_names:
-        ws.cell(row=r, column=1, value=name)
-        for j, p in enumerate(result.projections, start=3):
-            c = ws.cell(row=r, column=j, value=p.tranche_ending_balances[name])
-            c.number_format = USD0
-        r += 1
-
-    widths = {"A": 30, "B": 8}
-    for i in range(3, len(headers) + 1):
-        widths[get_column_letter(i)] = 13
-    _autofit(ws, widths)
+def _su(key: str) -> str:
+    return f"'{SU}'!$B${SU_ROWS[key]}"
 
 
-def _write_returns_sheet(ws: Worksheet, result: LBOResult, sensitivity: Optional[dict] = None):
-    _title(ws, "Exit & Sponsor Returns")
-    row = 4
-    exit_gross_debt = result.exit_net_debt + result.exit_cash_balance
-    lines = [
-        ("Exit-Year EBITDA", result.exit_ebitda, USD0),
-        ("Exit Enterprise Value", result.exit_enterprise_value, USD0),
-        ("Less: Exit Debt", -exit_gross_debt, USD0),
-        ("Add: Exit Cash Balance", result.exit_cash_balance, USD0),
-        ("Exit Equity Value", result.exit_equity_value, USD0),
-        (None, None, None),
-        ("Initial Sponsor Equity", result.sources_uses.sponsor_equity, USD0),
-        ("MOIC", result.sponsor_moic, MULT1),
-        ("IRR", result.sponsor_irr, PCT1),
-    ]
-    for label, val, fmt in lines:
-        if label is None:
-            row += 1
-            continue
-        ws.cell(row=row, column=1, value=label).font = BOLD if label in ("Exit Equity Value", "MOIC", "IRR") else Font()
-        c = ws.cell(row=row, column=2, value=val)
-        c.number_format = fmt
-        row += 1
+def _write_sources_uses(ws: Worksheet):
+    _title(ws, "Sources & Uses", "Every figure is a formula. Sponsor equity is the plug.")
+    _section(ws, 4, "Uses")
+    _label(ws, "A5", "Purchase enterprise value", indent=1)
+    _put(ws, "B5", f"={_a('entry')}*{_a('ebitda')}")
+    _label(ws, "A6", "Transaction fees", indent=1)
+    _put(ws, "B6", f"={_a('txn_fee')}*B5")
+    _label(ws, "A7", "Financing fees", indent=1)
+    _put(ws, "B7", f"={_a('fin_fee')}*B11")
+    _label(ws, "A8", "Total uses", bold=True)
+    _put(ws, "B8", "=SUM(B5:B7)", bold=True)
+    ws["B8"].border = TOTAL_BORDER
 
-    if result.warnings:
-        row += 1
-        ws.cell(row=row, column=1, value="Warnings").font = BOLD
-        row += 1
-        for w in result.warnings:
-            ws.cell(row=row, column=1, value=f"⚠ {w}").fill = PatternFill(fill_type="solid", fgColor=RED_FLAG)
-            row += 1
+    _section(ws, 10, "Sources")
+    _label(ws, "A11", "New debt", indent=1)
+    _put(ws, "B11", f"={_a('leverage')}*{_a('ebitda')}")
+    _label(ws, "A12", "Management rollover", indent=1)
+    _put(ws, "B12", f"={_a('rollover')}*B5")
+    _label(ws, "A13", "Sponsor equity (plug)", indent=1)
+    _put(ws, "B13", "=B8-B11-B12")
+    _label(ws, "A14", "Total sources", bold=True)
+    _put(ws, "B14", "=SUM(B11:B13)", bold=True)
+    ws["B14"].border = TOTAL_BORDER
 
-    if sensitivity:
-        row += 2
-        ws.cell(row=row, column=1, value="Sensitivity: IRR by Leverage (rows) x Exit Multiple (cols)").font = BOLD
-        row += 1
-        for j, ex in enumerate(sensitivity["exit_multiples"], start=2):
-            ws.cell(row=row, column=j, value=f"{ex:.1f}x")
-        _style_header_row(ws, row, len(sensitivity["exit_multiples"]), start_col=2)
+    _label(ws, "A16", "Check: sources − uses", bold=True)
+    c = _put(ws, "B16", "=B14-B8", bold=True)
+    c.fill = CHECK_OK
+    _label(ws, "A17", "Equity as % of total uses", indent=1)
+    _put(ws, "B17", "=B13/B8", PCT)
+    _widths(ws, first=34, rest=18)
+
+
+# --------------------------------------------------------------------------------
+DS = "Debt Schedule"
+IS_ = "Income Statement"
+CF = "Cash Flow"
+BS = "Balance Sheet"
+
+
+def _write_debt_schedule(ws: Worksheet, years: int):
+    """
+    Senior is repaid before subordinated. Interest is on beginning balances, which is
+    what keeps the workbook free of circular references.
+    """
+    _title(ws, "Debt Schedule",
+           "Mandatory amortisation first, then the sweep, senior before subordinated.")
+    _year_header(ws, 4, years, first_col=3, opening_label="At close")
+    col = lambda i: get_column_letter(3 + i)          # Year i (0-based) -> column
+    prev = lambda i: get_column_letter(2 + i)         # the column to its left
+
+    r = {"sr_beg": 6, "sr_int": 7, "sr_amort": 8, "sr_sweep": 9, "sr_end": 10,
+         "sb_beg": 12, "sb_int": 13, "sb_sweep": 14, "sb_end": 15,
+         "int_tot": 17, "amort_tot": 18, "avail": 19, "swept_tot": 20, "debt_tot": 21}
+
+    _section(ws, 5, "Senior Term Loan")
+    for key, text in (("sr_beg", "Beginning balance"), ("sr_int", "Interest expense"),
+                      ("sr_amort", "Mandatory amortisation"), ("sr_sweep", "Cash sweep"),
+                      ("sr_end", "Ending balance")):
+        _label(ws, f"A{r[key]}", text, indent=1, bold=key.endswith("end"))
+    _section(ws, 11, "Subordinated Notes")
+    for key, text in (("sb_beg", "Beginning balance"), ("sb_int", "Interest expense"),
+                      ("sb_sweep", "Cash sweep"), ("sb_end", "Ending balance")):
+        _label(ws, f"A{r[key]}", text, indent=1, bold=key.endswith("end"))
+    _section(ws, 16, "Total")
+    for key, text in (("int_tot", "Total interest expense"),
+                      ("amort_tot", "Total mandatory amortisation"),
+                      ("avail", "Cash available for sweep"),
+                      ("swept_tot", "Total swept to debt"),
+                      ("debt_tot", "Total debt outstanding")):
+        _label(ws, f"A{r[key]}", text, indent=1, bold=key == "debt_tot")
+
+    # opening balances at close (column B)
+    _put(ws, f"B{r['sr_beg']}", f"={_su('debt')}*{_a('sr_pct')}")
+    _put(ws, f"B{r['sb_beg']}", f"={_su('debt')}*(1-{_a('sr_pct')})")
+    _put(ws, f"B{r['debt_tot']}", f"=B{r['sr_beg']}+B{r['sb_beg']}", bold=True)
+
+    for i in range(years):
+        c, p = col(i), prev(i)
+        # Senior
+        _put(ws, f"{c}{r['sr_beg']}", f"={p}{r['sr_end'] if i else r['sr_beg']}")
+        _put(ws, f"{c}{r['sr_int']}", f"={c}{r['sr_beg']}*{_a('sr_rate')}")
+        _put(ws, f"{c}{r['sr_amort']}",
+             f"=MIN({_a('sr_amort')}*$B${r['sr_beg']},{c}{r['sr_beg']})")
+        _put(ws, f"{c}{r['sr_sweep']}",
+             f"=MIN({c}{r['avail']},{c}{r['sr_beg']}-{c}{r['sr_amort']})")
+        _put(ws, f"{c}{r['sr_end']}",
+             f"={c}{r['sr_beg']}-{c}{r['sr_amort']}-{c}{r['sr_sweep']}", bold=True)
+        # Subordinated — takes only what the senior sweep left over
+        _put(ws, f"{c}{r['sb_beg']}", f"={p}{r['sb_end'] if i else r['sb_beg']}")
+        _put(ws, f"{c}{r['sb_int']}", f"={c}{r['sb_beg']}*{_a('sub_rate')}")
+        _put(ws, f"{c}{r['sb_sweep']}",
+             f"=MIN({c}{r['avail']}-{c}{r['sr_sweep']},{c}{r['sb_beg']})")
+        _put(ws, f"{c}{r['sb_end']}", f"={c}{r['sb_beg']}-{c}{r['sb_sweep']}", bold=True)
+        # Totals
+        _put(ws, f"{c}{r['int_tot']}", f"={c}{r['sr_int']}+{c}{r['sb_int']}")
+        _put(ws, f"{c}{r['amort_tot']}", f"={c}{r['sr_amort']}")
+        # CF row 10 is free cash flow before debt service. Pointing this one row higher
+        # (at the NWC line) silently disables the sweep whenever growth is zero.
+        _put(ws, f"{c}{r['avail']}",
+             f"=MAX(0,'{CF}'!{c}10-{c}{r['amort_tot']})*{_a('sweep')}")
+        _put(ws, f"{c}{r['swept_tot']}", f"={c}{r['sr_sweep']}+{c}{r['sb_sweep']}")
+        _put(ws, f"{c}{r['debt_tot']}", f"={c}{r['sr_end']}+{c}{r['sb_end']}", bold=True)
+
+    ws[f"A{r['avail']}"].font = Font(italic=True)
+    _widths(ws, first=34, rest=15)
+    return r
+
+
+def _write_income_statement(ws: Worksheet, years: int):
+    _title(ws, "Income Statement",
+           "Margin is held at the entry margin; D&A is a percentage of revenue.")
+    _year_header(ws, 4, years, first_col=3, opening_label="LTM")
+    col = lambda i: get_column_letter(3 + i)
+    prev = lambda i: get_column_letter(2 + i)
+    rows = {"rev": 6, "ebitda": 7, "margin": 8, "da": 9, "ebit": 10,
+            "int": 11, "ebt": 12, "tax": 13, "ni": 14}
+    for key, text, bold in (("rev", "Revenue", False), ("ebitda", "EBITDA", True),
+                            ("margin", "EBITDA margin", False), ("da", "Less: D&A", False),
+                            ("ebit", "EBIT", True), ("int", "Less: interest expense", False),
+                            ("ebt", "Pre-tax income", True), ("tax", "Less: cash taxes", False),
+                            ("ni", "Net income", True)):
+        _label(ws, f"A{rows[key]}", text, bold=bold, indent=0 if bold else 1)
+
+    _put(ws, f"B{rows['rev']}", f"={_a('revenue')}")
+    _put(ws, f"B{rows['ebitda']}", f"={_a('ebitda')}")
+    _put(ws, f"B{rows['margin']}", f"=B{rows['ebitda']}/B{rows['rev']}", PCT)
+    for i in range(years):
+        c, p = col(i), prev(i)
+        _put(ws, f"{c}{rows['rev']}", f"={p}{rows['rev']}*(1+{_a('growth')})")
+        _put(ws, f"{c}{rows['ebitda']}", f"={c}{rows['rev']}*{_a('margin')}", bold=True)
+        _put(ws, f"{c}{rows['margin']}", f"={c}{rows['ebitda']}/{c}{rows['rev']}", PCT)
+        _put(ws, f"{c}{rows['da']}", f"={c}{rows['rev']}*{_a('da')}")
+        _put(ws, f"{c}{rows['ebit']}", f"={c}{rows['ebitda']}-{c}{rows['da']}", bold=True)
+        _put(ws, f"{c}{rows['int']}", f"='{DS}'!{c}17")
+        _put(ws, f"{c}{rows['ebt']}", f"={c}{rows['ebit']}-{c}{rows['int']}", bold=True)
+        _put(ws, f"{c}{rows['tax']}", f"=MAX(0,{c}{rows['ebt']}*{_a('tax')})")
+        _put(ws, f"{c}{rows['ni']}", f"={c}{rows['ebt']}-{c}{rows['tax']}", bold=True)
+    _widths(ws, first=30, rest=15)
+    return rows
+
+
+def _write_cash_flow(ws: Worksheet, years: int):
+    _title(ws, "Cash Flow Statement",
+           "Free cash flow before debt service feeds the sweep on the Debt Schedule.")
+    _year_header(ws, 4, years, first_col=3, opening_label=None)
+    col = lambda i: get_column_letter(3 + i)
+    prev = lambda i: get_column_letter(2 + i)
+    R = {"ni": 6, "da": 7, "capex": 8, "nwc": 9, "fcf": 10,
+         "amort": 12, "sweep": 13, "netchg": 14, "begcash": 16, "endcash": 17}
+    for key, text, bold in (("ni", "Net income", False), ("da", "Add: D&A (non-cash)", False),
+                            ("capex", "Less: capital expenditure", False),
+                            ("nwc", "Less: increase in NWC", False),
+                            ("fcf", "Free cash flow before debt service", True),
+                            ("amort", "Less: mandatory amortisation", False),
+                            ("sweep", "Less: cash sweep", False),
+                            ("netchg", "Net change in cash", True),
+                            ("begcash", "Beginning cash", False),
+                            ("endcash", "Ending cash", True)):
+        _label(ws, f"A{R[key]}", text, bold=bold, indent=0 if bold else 1)
+
+    for i in range(years):
+        c, p = col(i), prev(i)
+        _put(ws, f"{c}{R['ni']}", f"='{IS_}'!{c}14")
+        _put(ws, f"{c}{R['da']}", f"='{IS_}'!{c}9")
+        _put(ws, f"{c}{R['capex']}", f"='{IS_}'!{c}6*{_a('capex')}")
+        _put(ws, f"{c}{R['nwc']}", f"=('{IS_}'!{c}6-'{IS_}'!{p}6)*{_a('nwc_pct')}")
+        _put(ws, f"{c}{R['fcf']}",
+             f"={c}{R['ni']}+{c}{R['da']}-{c}{R['capex']}-{c}{R['nwc']}", bold=True)
+        _put(ws, f"{c}{R['amort']}", f"='{DS}'!{c}18")
+        _put(ws, f"{c}{R['sweep']}", f"='{DS}'!{c}20")
+        _put(ws, f"{c}{R['netchg']}",
+             f"={c}{R['fcf']}-{c}{R['amort']}-{c}{R['sweep']}", bold=True)
+        _put(ws, f"{c}{R['begcash']}", "=0" if i == 0 else f"={p}{R['endcash']}")
+        _put(ws, f"{c}{R['endcash']}",
+             f"={c}{R['begcash']}+{c}{R['netchg']}", bold=True)
+    _widths(ws, first=36, rest=15)
+    return R
+
+
+def _write_balance_sheet(ws: Worksheet, years: int, cf_rows: dict, is_rows: dict):
+    """
+    Goodwill is the plug at close, which is what makes the sheet tie: assets must equal
+    the total sources that funded them. The check row is the point of the sheet.
+    """
+    _title(ws, "Balance Sheet",
+           "Goodwill is the purchase-accounting plug at close. The check row must be zero.")
+    _year_header(ws, 4, years, first_col=3, opening_label="At close")
+    col = lambda i: get_column_letter(3 + i)
+    prev = lambda i: get_column_letter(2 + i)
+    R = {"cash": 6, "nwc": 7, "ppe": 8, "gw": 9, "assets": 10,
+         "debt": 13, "equity": 14, "liab_eq": 15, "check": 17}
+    for key, text, bold in (("cash", "Cash", False), ("nwc", "Non-cash working capital", False),
+                            ("ppe", "PP&E, net", False), ("gw", "Goodwill & intangibles", False),
+                            ("assets", "Total assets", True),
+                            ("debt", "Total debt", False), ("equity", "Shareholders' equity", False),
+                            ("liab_eq", "Total liabilities & equity", True),
+                            ("check", "Check: assets − (liabilities + equity)", True)):
+        _label(ws, f"A{R[key]}", text, bold=bold, indent=0 if bold else 1)
+    _section(ws, 12, "Liabilities & equity")
+
+    # At close
+    _put(ws, f"B{R['cash']}", f"={_a('cash')}")
+    _put(ws, f"B{R['nwc']}", f"={_a('nwc')}")
+    _put(ws, f"B{R['ppe']}", f"={_a('ppe')}")
+    _put(ws, f"B{R['gw']}", f"={_su('uses')}-B{R['nwc']}-B{R['ppe']}")
+    _put(ws, f"B{R['assets']}", f"=SUM(B{R['cash']}:B{R['gw']})", bold=True)
+    _put(ws, f"B{R['debt']}", f"={_su('debt')}")
+    _put(ws, f"B{R['equity']}", f"={_su('sponsor')}+{_su('roll')}")
+    _put(ws, f"B{R['liab_eq']}", f"=B{R['debt']}+B{R['equity']}", bold=True)
+    _put(ws, f"B{R['check']}", f"=B{R['assets']}-B{R['liab_eq']}", bold=True).fill = CHECK_OK
+
+    for i in range(years):
+        c, p = col(i), prev(i)
+        _put(ws, f"{c}{R['cash']}", f"='{CF}'!{c}{cf_rows['endcash']}")
+        _put(ws, f"{c}{R['nwc']}", f"={p}{R['nwc']}+'{CF}'!{c}{cf_rows['nwc']}")
+        _put(ws, f"{c}{R['ppe']}",
+             f"={p}{R['ppe']}+'{CF}'!{c}{cf_rows['capex']}-'{CF}'!{c}{cf_rows['da']}")
+        _put(ws, f"{c}{R['gw']}", f"={p}{R['gw']}")
+        _put(ws, f"{c}{R['assets']}", f"=SUM({c}{R['cash']}:{c}{R['gw']})", bold=True)
+        _put(ws, f"{c}{R['debt']}", f"='{DS}'!{c}21")
+        _put(ws, f"{c}{R['equity']}", f"={p}{R['equity']}+'{IS_}'!{c}{is_rows['ni']}")
+        _put(ws, f"{c}{R['liab_eq']}", f"={c}{R['debt']}+{c}{R['equity']}", bold=True)
+        _put(ws, f"{c}{R['check']}",
+             f"={c}{R['assets']}-{c}{R['liab_eq']}", bold=True).fill = CHECK_OK
+    _widths(ws, first=38, rest=15)
+    return R
+
+
+def _write_returns(ws: Worksheet, years: int, bs_rows: dict, is_rows: dict,
+                   sensitivity: Optional[dict]):
+    _title(ws, "Exit & Sponsor Returns",
+           "Exit multiple applies to final-year EBITDA. IRR is a CAGR — valid because "
+           "the sponsor has exactly one cash flow in and one out.")
+    last = get_column_letter(3 + years - 1)
+    R = {"ebitda": 5, "mult": 6, "ev": 7, "debt": 8, "cash": 9, "eq": 10,
+         "spons": 12, "moic": 13, "irr": 14}
+    for key, text, bold in (("ebitda", "Exit-year EBITDA", False),
+                            ("mult", "Exit EV / EBITDA", False),
+                            ("ev", "Exit enterprise value", True),
+                            ("debt", "Less: debt outstanding", False),
+                            ("cash", "Add: cash balance", False),
+                            ("eq", "Exit equity value", True),
+                            ("spons", "Sponsor equity invested", False),
+                            ("moic", "MOIC", True), ("irr", "IRR", True)):
+        _label(ws, f"A{R[key]}", text, bold=bold, indent=0 if bold else 1)
+
+    _put(ws, f"B{R['ebitda']}", f"='{IS_}'!{last}{is_rows['ebitda']}")
+    _put(ws, f"B{R['mult']}", f"={_a('exit')}", MULT)
+    _put(ws, f"B{R['ev']}", f"=B{R['ebitda']}*B{R['mult']}", bold=True)
+    _put(ws, f"B{R['debt']}", f"='{BS}'!{last}{bs_rows['debt']}")
+    _put(ws, f"B{R['cash']}", f"='{BS}'!{last}{bs_rows['cash']}")
+    _put(ws, f"B{R['eq']}", f"=B{R['ev']}-B{R['debt']}+B{R['cash']}", bold=True)
+    _put(ws, f"B{R['spons']}", f"={_su('sponsor')}")
+    _put(ws, f"B{R['moic']}", f"=B{R['eq']}/B{R['spons']}", MULT, bold=True)
+    _put(ws, f"B{R['irr']}", f"=B{R['moic']}^(1/{_a('hold')})-1", PCT, bold=True)
+
+    if sensitivity and sensitivity.get("irr"):
+        start = 17
+        ws.cell(row=start - 1, column=1, value="Sensitivity — IRR (exit multiple × leverage)"
+                ).font = SECTION_FONT
+        ws.cell(row=start + 1, column=1, value="Leverage ↓ / Exit →").font = Font(italic=True)
+        for j, exit_m in enumerate(sensitivity["exit_multiples"]):
+            c = ws.cell(row=start + 1, column=2 + j, value=exit_m)
+            c.number_format, c.font, c.fill = MULT, HEADER_FONT, HEADER_FILL
         for i, lev in enumerate(sensitivity["leverage_multiples"]):
-            row += 1
-            ws.cell(row=row, column=1, value=f"{lev:.1f}x leverage").font = BOLD
-            for j, val in enumerate(sensitivity["irr"][i], start=2):
-                c = ws.cell(row=row, column=j, value=val)
-                c.number_format = PCT1
-
-        row += 2
-        ws.cell(row=row, column=1, value="Sensitivity: MOIC by Leverage (rows) x Exit Multiple (cols)").font = BOLD
-        row += 1
-        for j, ex in enumerate(sensitivity["exit_multiples"], start=2):
-            ws.cell(row=row, column=j, value=f"{ex:.1f}x")
-        _style_header_row(ws, row, len(sensitivity["exit_multiples"]), start_col=2)
-        for i, lev in enumerate(sensitivity["leverage_multiples"]):
-            row += 1
-            ws.cell(row=row, column=1, value=f"{lev:.1f}x leverage").font = BOLD
-            for j, val in enumerate(sensitivity["moic"][i], start=2):
-                c = ws.cell(row=row, column=j, value=val)
-                c.number_format = MULT1
-
-    _autofit(ws, {"A": 32, "B": 14, "C": 14, "D": 14, "E": 14, "F": 14})
+            c = ws.cell(row=start + 2 + i, column=1, value=lev)
+            c.number_format, c.font = MULT, Font(bold=True)
+            for j, val in enumerate(sensitivity["irr"][i]):
+                cell = ws.cell(row=start + 2 + i, column=2 + j, value=val)
+                cell.number_format = PCT
+                cell.font = Font(color=INPUT_BLUE)
+        note = ws.cell(row=start + 2 + len(sensitivity["leverage_multiples"]) + 1, column=1,
+                       value="Grid values come from re-running the Python engine, not from "
+                             "this workbook's formulas — hence blue. Excel Data Tables "
+                             "cannot be written by openpyxl.")
+        note.font = SUBTITLE_FONT
+    _widths(ws, first=32, rest=14)
 
 
-def _write_memo_sheet(ws: Worksheet, memo_text: Optional[str]):
-    _title(ws, "Investment Memo", "Written by the Claude agent from the model outputs above")
-    ws["A4"] = memo_text or "(No memo generated for this run.)"
-    ws["A4"].alignment = Alignment(wrap_text=True, vertical="top")
-    ws.row_dimensions[4].height = 400
-    ws.column_dimensions["A"].width = 110
+def _write_memo(ws: Worksheet, memo_text: Optional[str]):
+    _title(ws, "Investment Memo", "Written by the Claude agent from the model outputs.")
+    cell = ws["A4"]
+    cell.value = memo_text or "(no memo)"
+    cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.column_dimensions["A"].width = 118
 
 
 def build_workbook(company: CompanyFinancials, ltm_revenue: float, ltm_ebitda: float,
-                    assumptions: LBOAssumptions, result: LBOResult,
-                    sensitivity: Optional[dict] = None, memo_text: Optional[str] = None) -> Workbook:
+                   assumptions: LBOAssumptions, result: LBOResult,
+                   sensitivity: Optional[dict] = None,
+                   memo_text: Optional[str] = None) -> Workbook:
+    """
+    Build the live model. `result` is no longer written into the sheets — the workbook
+    recomputes everything from the assumptions — but it stays in the signature because
+    the caller has it and the recalculation test compares the two.
+    """
+    years = assumptions.hold_period_years
     wb = Workbook()
-    ws1 = wb.active
-    ws1.title = "Assumptions"
-    _write_assumptions_sheet(ws1, company, ltm_revenue, ltm_ebitda, assumptions)
+    wb.remove(wb.active)
 
-    ws2 = wb.create_sheet("Sources & Uses")
-    _write_sources_uses_sheet(ws2, result)
+    _write_assumptions(wb.create_sheet(ASM), company, ltm_revenue, ltm_ebitda, assumptions)
+    _write_sources_uses(wb.create_sheet(SU))
+    _write_debt_schedule(wb.create_sheet(DS), years)
+    is_rows = _write_income_statement(wb.create_sheet(IS_), years)
+    cf_rows = _write_cash_flow(wb.create_sheet(CF), years)
+    bs_rows = _write_balance_sheet(wb.create_sheet(BS), years, cf_rows, is_rows)
+    _write_returns(wb.create_sheet("Returns"), years, bs_rows, is_rows, sensitivity)
+    _write_memo(wb.create_sheet("Investment Memo"), memo_text)
 
-    ws3 = wb.create_sheet("Operating Model")
-    _write_projections_sheet(ws3, result)
-
-    ws4 = wb.create_sheet("Returns")
-    _write_returns_sheet(ws4, result, sensitivity)
-
-    ws5 = wb.create_sheet("Investment Memo")
-    _write_memo_sheet(ws5, memo_text)
-
-    for ws in wb.worksheets:
-        ws.sheet_view.showGridLines = False
-
+    # Tab colours: inputs, statements, outputs.
+    wb[ASM].sheet_properties.tabColor = "0070C0"
+    for name in (SU, DS, IS_, CF, BS):
+        wb[name].sheet_properties.tabColor = "808080"
+    wb["Returns"].sheet_properties.tabColor = "00B050"
     return wb
 
 
