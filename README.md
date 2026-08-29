@@ -10,6 +10,12 @@ schedule with a cash sweep, five-year projections, exit returns (MOIC/IRR),
 and a sensitivity grid — and outputs a formatted Excel workbook plus a
 one-page investment memo.
 
+![The PaperLBO web UI after a live SHOE run](docs/img/webui.png)
+
+*A real run: ticker in, the agent's reasoning streaming live, and a finished model —
+deleveraging curve, the assumptions it chose and defended, returns, an IRR sensitivity
+grid, the memo, and the Excel workbook.*
+
 Built as a portfolio project for private equity recruiting. It automates
 what PE firms call a "paper LBO" — a standard interview screen — end to end:
 give it a ticker, it fetches the filings, proposes and justifies its own
@@ -177,7 +183,8 @@ reasoning streaming in as it works, a deleveraging chart, the deal assumptions i
 chose, the returns, an IRR sensitivity heatmap, the memo, and a downloadable Excel
 model. It's a thin layer over the same tool-use loop the CLI runs
 (`agent.iter_agent_events`) — no calculation logic is duplicated, and every number
-on screen is passed straight through from `lbo_engine`.
+on screen is passed straight through from `lbo_engine`. The screenshot at the top of
+this README is an unedited capture of a real SHOE run.
 
 ```bash
 pip install -r requirements.txt          # includes fastapi + uvicorn
