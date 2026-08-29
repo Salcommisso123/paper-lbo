@@ -10,7 +10,13 @@ schedule with a cash sweep, five-year projections, exit returns (MOIC/IRR),
 and a sensitivity grid — and outputs a formatted Excel workbook plus a
 one-page investment memo.
 
-![The PaperLBO web UI after a live SHOE run](docs/img/webui.png)
+### ▶ [**Try it live — salcommisso123.github.io/paper-lbo**](https://salcommisso123.github.io/paper-lbo/)
+
+No sign-up, no API key. Two real runs recorded against SEC filings and replayed in the
+browser: **SHOE**, which builds a full model, and **FLWS**, where the agent refuses to
+model negative EBITDA. The Excel workbook downloads from the page.
+
+[![The PaperLBO web UI after a live SHOE run](docs/img/webui.png)](https://salcommisso123.github.io/paper-lbo/)
 
 *A real run: ticker in, the agent's reasoning streaming live, and a finished model —
 deleveraging curve, the assumptions it chose and defended, returns, an IRR sensitivity
@@ -197,6 +203,8 @@ uvicorn webapp.server:app --reload       # reads .env for the two keys
 ```
 
 ### The live demo
+
+**[salcommisso123.github.io/paper-lbo](https://salcommisso123.github.io/paper-lbo/)**
 
 The public demo is a **static site** — the same page and the same renderer, replaying
 recorded runs client-side. There is no backend, so no `ANTHROPIC_API_KEY` lives on any
