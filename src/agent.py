@@ -286,6 +286,11 @@ class AgentState:
         self.ltm_ebitda: float | None = None
         self.assumptions: LBOAssumptions | None = None
         self.result = None
+        # Every propose_and_run_lbo call, in order. The agent may run a flat base case
+        # and then an upside case with an expanded exit multiple; without this, the LAST
+        # run silently became the headline, the workbook, and the sensitivity centre —
+        # so a memo leading with the base case could ship an upside-case model.
+        self.runs: list[dict] = []
         self.sensitivity: dict | None = None
         self.saved_to: str | None = None
         self.memo_text: str | None = None
@@ -295,6 +300,24 @@ class AgentState:
         self.verification: dict | None = None
         self.benchmarks: dict | None = None
         self.mdna: dict | None = None
+
+
+def base_run(state) -> dict | None:
+    """
+    The base case is the most recent run with NO multiple expansion (exit == entry).
+    That is the conservative convention the memo leads with, so it is what the
+    workbook, the headline returns and the sensitivity grid are built from.
+    Returns None when the agent never ran a flat case.
+    """
+    flat = [r for r in state.runs
+            if r["assumptions"].exit_ev_multiple == r["assumptions"].entry_ev_multiple]
+    return flat[-1] if flat else None
+
+
+def upside_runs(state) -> list[dict]:
+    """Runs that assume the exit multiple expands above entry — never the headline."""
+    return [r for r in state.runs
+            if r["assumptions"].exit_ev_multiple > r["assumptions"].entry_ev_multiple]
 
 
 def _assumptions_from_tool_input(inp: dict) -> LBOAssumptions:
@@ -403,6 +426,7 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
                                 "user and stop — do not force a model."}
         state.assumptions = assumptions
         state.result = result
+        state.runs.append({"assumptions": assumptions, "result": result})
         return {
             "sources_uses": asdict(result.sources_uses),
             "exit_ebitda": result.exit_ebitda,
@@ -423,7 +447,9 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
     if name == "run_sensitivity":
         if state.assumptions is None:
             return {"error": "Call propose_and_run_lbo first."}
-        grid = sensitivity_grid(state.ltm_revenue, state.ltm_ebitda, state.assumptions,
+        base = base_run(state)
+        grid = sensitivity_grid(state.ltm_revenue, state.ltm_ebitda,
+                                 base["assumptions"] if base else state.assumptions,
                                  exit_multiples=tool_input["exit_multiples"],
                                  leverage_multiples=tool_input["leverage_multiples"])
         state.sensitivity = grid
@@ -437,10 +463,18 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
         # result AND sits next to the right label. Blocks the write once so Claude can
         # correct itself; a second attempt writes anyway, with the findings attached so
         # a problem is never silently buried in the workbook.
-        audit = audit_memo(
-            tool_input["memo_text"], state.tool_values,
-            build_labelled_values(state.company, state.ltm_revenue, state.ltm_ebitda,
-                                  state.result, state.result.sources_uses))
+        # The memo legitimately discusses the base case AND any upside case, so a label's
+        # accepted values are the union across every run. Auditing against one run alone
+        # would flag the other's correct figures.
+        labelled: dict[str, list] = {}
+        for run in (state.runs or [{"result": state.result}]):
+            r = run["result"]
+            for key, values in build_labelled_values(
+                    state.company, state.ltm_revenue, state.ltm_ebitda,
+                    r, r.sources_uses).items():
+                labelled.setdefault(key, [])
+                labelled[key].extend(v for v in values if v not in labelled[key])
+        audit = audit_memo(tool_input["memo_text"], state.tool_values, labelled)
         state.memo_audit = audit
         state.memo_audit_attempts += 1
         if not audit["clean"] and state.memo_audit_attempts == 1:
@@ -456,8 +490,11 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
 
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / tool_input["output_filename"]
+        # Build the workbook from the BASE case so the file matches the memo's headline.
+        # Falls back to the last run only if the agent never ran a flat-multiple case.
+        base = base_run(state) or {"assumptions": state.assumptions, "result": state.result}
         wb = build_workbook(state.company, state.ltm_revenue, state.ltm_ebitda,
-                             state.assumptions, state.result,
+                             base["assumptions"], base["result"],
                              sensitivity=state.sensitivity, memo_text=tool_input["memo_text"])
         save_workbook(wb, str(out_path))
         state.saved_to = str(out_path)
@@ -476,7 +513,14 @@ def _final_summary(state: AgentState) -> dict:
                 "ticker": state.company.ticker if state.company else None,
                 "data_quality_flags": state.company.data_quality_flags if state.company else [],
                 "verification": state.verification}
-    r, su, a = state.result, state.result.sources_uses, state.assumptions
+    # Headline the BASE case (flat exit multiple), not whatever ran last. An upside case
+    # run after the base case would otherwise become the dashboard's headline return.
+    base = base_run(state)
+    if base:
+        r, a = base["result"], base["assumptions"]
+    else:
+        r, a = state.result, state.assumptions
+    su = r.sources_uses
     return {
         "completed": True,
         "company": state.company.company_name,
@@ -513,6 +557,17 @@ def _final_summary(state: AgentState) -> dict:
         "sensitivity": state.sensitivity,
         "verification": state.verification,
         "memo_audit": state.memo_audit,
+        # Which case the headline figures above describe, and any expanded-multiple run
+        # kept explicitly separate so a UI can never present it as the base case.
+        "case": "base_flat" if base else "no_flat_case_run",
+        "upside_cases": [
+            {"entry_ev_multiple": u["assumptions"].entry_ev_multiple,
+             "exit_ev_multiple": u["assumptions"].exit_ev_multiple,
+             "moic": u["result"].sponsor_moic,
+             "irr": u["result"].sponsor_irr,
+             "exit_equity_value": u["result"].exit_equity_value}
+            for u in upside_runs(state)
+        ],
         "benchmarks": state.benchmarks,
         "management_discussion": state.mdna,
         "warnings": r.warnings,

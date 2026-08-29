@@ -248,3 +248,66 @@ def test_generic_sector_query_is_ambiguous_not_guessed():
     assert match is None
     assert "Retail (Special Lines)" in candidates and "Retail (REITs)" in candidates
     assert resolve_industry("specialty retail", INDUSTRIES)[0] == "Retail (Special Lines)"
+
+
+# ---- base-case selection -----------------------------------------------------
+
+import agent as agent_mod  # noqa: E402
+from lbo_engine import run_lbo as _run_lbo  # noqa: E402
+
+LTM_REV, LTM_EBITDA = 1_135_324_000, 101_106_000
+
+
+def _add_run(state, entry, exit_):
+    a = agent_mod._assumptions_from_tool_input(
+        {"entry_ev_multiple": entry, "exit_ev_multiple": exit_, "hold_period_years": 5,
+         "leverage_multiple": 3.5, "revenue_growth_rate": 0.0})
+    r = _run_lbo(LTM_REV, LTM_EBITDA, a)
+    state.runs.append({"assumptions": a, "result": r})
+    state.assumptions, state.result = a, r      # mirrors execute_tool
+    return a, r
+
+
+def _state():
+    s = agent_mod.AgentState()
+    s.ltm_revenue, s.ltm_ebitda = LTM_REV, LTM_EBITDA
+    return s
+
+
+def test_upside_run_after_base_does_not_become_the_headline():
+    """
+    The regression this guards: the agent runs a flat base case, then an upside case
+    with an expanded exit multiple. The last run used to drive the dashboard headline,
+    the workbook, and the sensitivity grid.
+    """
+    s = _state()
+    _add_run(s, 6.0, 6.0)
+    _add_run(s, 6.0, 7.0)                       # upside, run LAST
+    assert s.assumptions.exit_ev_multiple == 7.0             # latest really is the upside
+    assert agent_mod.base_run(s)["assumptions"].exit_ev_multiple == 6.0
+    assert len(agent_mod.upside_runs(s)) == 1
+
+
+def test_base_case_is_the_most_recent_flat_run():
+    """A revised base case supersedes the first attempt."""
+    s = _state()
+    _add_run(s, 7.0, 7.0)
+    _add_run(s, 5.5, 5.5)
+    assert agent_mod.base_run(s)["assumptions"].entry_ev_multiple == 5.5
+    assert agent_mod.upside_runs(s) == []
+
+
+def test_no_flat_run_is_reported_rather_than_faked():
+    """If the agent only ever ran an expanded-multiple case, say so — don't relabel it."""
+    s = _state()
+    _add_run(s, 5.0, 7.0)
+    assert agent_mod.base_run(s) is None
+    assert len(agent_mod.upside_runs(s)) == 1
+
+
+def test_contracting_exit_multiple_is_not_an_upside():
+    """Exit below entry is a downside case; it is neither base nor upside."""
+    s = _state()
+    _add_run(s, 7.0, 6.0)
+    assert agent_mod.base_run(s) is None
+    assert agent_mod.upside_runs(s) == []

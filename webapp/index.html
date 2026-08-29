@@ -148,7 +148,10 @@
       <div class="chartcard rounded-2xl border border-white/[.06] p-5">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div class="text-sm text-[#A9B6AD]">Exit equity value</div>
+            <div class="flex items-center gap-2 text-sm text-[#A9B6AD]">
+              <span>Exit equity value</span>
+              <span id="case-chip" class="hidden rounded-md border border-lime/25 bg-lime/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime">base case</span>
+            </div>
             <div class="mt-1 flex items-center gap-3">
               <div id="hero-value" class="text-[40px] font-semibold leading-none tracking-tight text-muted">—</div>
               <span id="hero-pill" class="hidden rounded-lg bg-lime/15 px-2 py-1 text-xs font-semibold text-lime">— MOIC</span>
@@ -213,6 +216,11 @@
             <div class="text-[11px] text-muted">IRR</div>
             <div id="out-irr" class="mt-0.5 text-2xl font-semibold tracking-tight">—</div>
           </div>
+        </div>
+
+        <div id="upside" class="mt-3 hidden rounded-xl border border-white/[.08] bg-black/25 p-3">
+          <div class="text-[11px] font-medium text-muted">Upside case — not the headline</div>
+          <div id="upside-rows" class="mt-1.5 space-y-1 text-xs"></div>
         </div>
 
         <ul id="warnings" class="mt-3 hidden space-y-1.5 rounded-xl border border-amber-400/25 bg-amber-400/[.07] p-3 text-xs text-amber-200/90"></ul>
@@ -513,6 +521,28 @@ function renderResults(s){
       <ul class="mt-2 space-y-1 text-xs text-amber-100/80">${items}</ul></div>`;
   }
 
+  // Headline is the flat-multiple base case. Any expanded-multiple run is shown
+  // separately and explicitly, never as the top-line number.
+  const chip=$("case-chip");
+  chip.classList.remove("hidden");
+  if(s.case==="no_flat_case_run"){
+    chip.textContent="no flat case";
+    chip.className="rounded-md border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300";
+    chip.title="The agent never ran a case with exit multiple equal to entry.";
+  } else {
+    chip.textContent="base case";
+    chip.className="rounded-md border border-lime/25 bg-lime/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime";
+    chip.title="Exit multiple equals entry — no assumed multiple expansion.";
+  }
+
+  const ups=s.upside_cases||[];
+  $("upside").classList.toggle("hidden", !ups.length);
+  $("upside-rows").innerHTML = ups.map(u=>
+    `<div class="flex items-center justify-between gap-3">
+       <span class="text-muted">exit ${fmtMult(u.exit_ev_multiple)} vs entry ${fmtMult(u.entry_ev_multiple)}</span>
+       <span class="font-semibold">${fmtMult(u.moic)} · ${fmtPct(u.irr)}</span>
+     </div>`).join("");
+
   const w=(s.warnings||[]);
   $("warnings").classList.toggle("hidden", !w.length);
   $("warnings").innerHTML = w.map(x=>`<li>⚠ ${esc(x)}</li>`).join("");
@@ -546,6 +576,8 @@ function start(){
   t0=Date.now(); summary=null;
   log.innerHTML=""; banner.classList.add("hidden"); banner.innerHTML="";
   $("warnings").classList.add("hidden");
+  $("upside").classList.add("hidden");
+  $("case-chip").classList.add("hidden");
   $("download").classList.add("hidden"); $("download").classList.remove("flex");
   $("download-idle").classList.remove("hidden");
   $("memo-body").innerHTML=`<span class="text-muted">Not written yet.</span>`;
