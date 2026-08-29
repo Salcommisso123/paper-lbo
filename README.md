@@ -210,9 +210,15 @@ open "http://127.0.0.1:8000/?replay=SHOE"    # free, forever after
 ```
 
 A fixture is the exact event stream `agent.iter_agent_events` produced, so the replay
-drives the real client code path — same SSE events, same renderer, real numbers.
-`webapp/fixtures/SHOE.json` is committed, so a fresh clone can see a finished run
-with no API key at all. Add `&delay=0` to render instantly instead of streaming.
+drives the real client code path — same SSE events, same renderer, real numbers. Add
+`&delay=0` to render instantly instead of streaming.
+
+Two fixtures are committed, so a fresh clone can see both outcomes with no API key:
+
+| `?replay=` | What it shows |
+| --- | --- |
+| `SHOE` | A complete model — assumptions, returns, sensitivity, memo, workbook |
+| `FLWS` | The agent **refusing** to model negative EBITDA, and saying why |
 
 Enter a ticker, watch the agent fetch filings, propose and justify assumptions,
 run the model, and write the workbook — then download it. Each run shows its own
