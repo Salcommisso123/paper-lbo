@@ -243,6 +243,42 @@ class CompanyFinancials:
         return None
 
 
+def assess_modelability(company: CompanyFinancials) -> dict:
+    """
+    Split data-quality findings into what BLOCKS a model and what is only a caveat.
+
+    SEC XBRL tagging is patchy: filers tag the same line item differently and often omit
+    tags entirely. A missing tag is normal and does not make a company unmodelable — only
+    the absence of usable LTM EBITDA does. Leaving that judgment to the model as prose
+    ("if the data-quality flags say the data is bad, stop") made it decline Shoe Carnival,
+    a perfectly modelable company, because the long-term-debt tags were absent. The
+    verdict is computed here so it is deterministic and testable.
+    """
+    latest = company.latest_complete_year()
+    blocking: list[str] = []
+    if not company.years:
+        blocking.append("No 10-K annual XBRL data found for this ticker at all.")
+    elif latest is None:
+        blocking.append("No fiscal year has both revenue and EBITDA — nothing to model from.")
+    elif latest.ebitda is not None and latest.ebitda <= 0:
+        blocking.append(f"LTM EBITDA is non-positive (${latest.ebitda:,.0f}). An LBO needs "
+                        f"positive cash earnings to service debt; modelling this would be "
+                        f"dishonest, not conservative.")
+
+    caveats = [f for f in company.data_quality_flags]
+    if latest is not None:
+        caveats += [f for f in latest.flags if "non-positive" not in f]
+
+    return {
+        "modelable": not blocking,
+        "blocking": blocking,
+        "caveats": caveats,
+        "note": ("Caveats are disclosures, not reasons to decline. Build the model and "
+                 "state them in the memo." if not blocking else
+                 "Do not build a model. Explain the blocking issue plainly and stop."),
+    }
+
+
 def fetch_company_financials(ticker: str, lookback_years: int = 5) -> CompanyFinancials:
     """
     Pull the last `lookback_years` of 10-K annual figures for `ticker` from

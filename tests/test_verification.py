@@ -415,3 +415,51 @@ def test_clean_memo_writes_first_time_with_no_notice(tmp_path):
         {"memo_text": memo, "output_filename": "T.xlsx"}, s, tmp_path)
     assert "saved_to" in out and out["memo_audit"]["clean"] is True
     assert "notice" not in out
+
+
+# ---- modelable vs. merely flagged --------------------------------------------
+
+from edgar import CompanyFinancials, FiscalYearFinancials, assess_modelability  # noqa: E402
+
+
+def _company(**year_kwargs):
+    year = FiscalYearFinancials(fy=2025, **year_kwargs)
+    return CompanyFinancials(ticker="T", cik="1", company_name="T", years=[year])
+
+
+def test_missing_debt_tags_are_a_caveat_not_a_blocker():
+    """
+    The regression this guards: a real run declined Shoe Carnival — a perfectly
+    modelable company — because SEC exposed no long-term-debt tags. A missing tag is
+    ordinary; only missing EBITDA stops a model.
+    """
+    company = _company(revenue=1_135_324_000, ebitda=101_106_000,
+                       flags=["No long-term-debt tags found — treating existing debt as $0"])
+    verdict = assess_modelability(company)
+    assert verdict["modelable"] is True
+    assert verdict["blocking"] == []
+    assert any("long-term-debt" in c for c in verdict["caveats"])
+
+
+def test_negative_ebitda_still_blocks():
+    """FLWS's real case — the refusal the project is built to make."""
+    company = _company(revenue=1_685_658_000, ebitda=-151_195_000)
+    verdict = assess_modelability(company)
+    assert verdict["modelable"] is False
+    assert any("non-positive" in b for b in verdict["blocking"])
+
+
+def test_no_usable_year_blocks():
+    company = _company(revenue=None, ebitda=None)
+    assert assess_modelability(company)["modelable"] is False
+
+
+def test_no_data_at_all_blocks():
+    empty = CompanyFinancials(ticker="T", cik="1", company_name="T", years=[])
+    assert assess_modelability(empty)["modelable"] is False
+
+
+def test_a_blocked_company_does_not_also_advertise_caveats_as_actionable():
+    """When blocked, the note must tell the agent to stop, not to disclose and proceed."""
+    company = _company(revenue=1e9, ebitda=-1e8)
+    assert "Do not build a model" in assess_modelability(company)["note"]

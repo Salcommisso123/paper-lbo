@@ -16,8 +16,8 @@ one-page investment memo.
 deleveraging curve, the assumptions it chose and defended, returns, an IRR sensitivity
 grid, the memo, and the Excel workbook. The headline is always the flat-multiple **base
 case** (exit multiple = entry); a run assuming multiple expansion is labelled as an
-upside case and never shown as the top-line return. Captured from a recorded run
-(`webapp/fixtures/SHOE.json`) — same SEC data, same engine output, no API call.*
+upside case and never shown as the top-line return. Captured from the recorded run in
+`webapp/fixtures/SHOE.json` — a real run against real filings, replayed without an API call.*
 
 Built as a portfolio project for private equity recruiting. It automates
 what PE firms call a "paper LBO" — a standard interview screen — end to end:

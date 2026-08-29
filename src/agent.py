@@ -41,7 +41,8 @@ import anthropic
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmarks import get_industry_benchmarks  # noqa: E402
-from edgar import CompanyFinancials, fetch_company_financials  # noqa: E402
+from edgar import (CompanyFinancials, assess_modelability,  # noqa: E402
+                   fetch_company_financials)
 from filings import get_management_discussion  # noqa: E402
 from excel_writer import build_workbook, save_workbook  # noqa: E402
 from lbo_engine import DebtTranche, LBOAssumptions, run_lbo, sensitivity_grid  # noqa: E402
@@ -76,8 +77,15 @@ reasonable assumptions) and communication (explaining them in plain English), no
 
 Workflow:
 1. Call get_company_financials for the ticker the user gave you.
-2. If EBITDA is missing, negative, or the data-quality flags say the data is bad, \
-tell the user plainly that this isn't a clean LBO candidate and stop — do not force a model.
+2. The result carries a `modelability` verdict. Stop ONLY when `modelable` is false — \
+that means there is no usable LTM EBITDA, and putting a model on top of it would be \
+dishonest. Say so plainly and stop.
+   Everything under `caveats` is a DISCLOSURE, not a reason to decline. SEC's XBRL \
+tagging is patchy and a missing tag is ordinary. In particular, missing long-term-debt \
+tags mean the model assumes zero existing debt: build the model anyway, state that \
+assumption plainly in the memo, and list "verify the balance sheet and debt schedule" \
+as a diligence item. Do not refuse a company because a tag is absent — refusing a \
+modelable company is as unhelpful as forcing a model onto a broken one.
 2a. verify_financials, get_industry_benchmarks and get_management_discussion do not \
 depend on each other — call all three in the SAME turn rather than one per turn. Every \
 extra turn re-sends the whole conversation, so batching them is materially cheaper.
@@ -376,6 +384,7 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
         return {
             "company_name": company.company_name,
             "cik": company.cik,
+            "modelability": assess_modelability(company),
             "data_quality_flags": company.data_quality_flags,
             "years": [
                 {"fy": y.fy, "revenue": y.revenue, "ebitda": y.ebitda,
