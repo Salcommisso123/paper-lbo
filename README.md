@@ -196,6 +196,22 @@ uvicorn webapp.server:app --reload       # reads .env for the two keys
 # open http://127.0.0.1:8000
 ```
 
+### The live demo
+
+The public demo is a **static site** — the same page and the same renderer, replaying
+recorded runs client-side. There is no backend, so no `ANTHROPIC_API_KEY` lives on any
+server and a visitor can never spend API credits. It also has no cold start, which the
+free container tiers do (~50s), and that matters when someone follows a link once.
+
+`.github/workflows/pages.yml` builds it with `python tools/build_site.py` and publishes
+to GitHub Pages on every push that touches the page, a fixture, or the builder.
+
+```bash
+python tools/build_site.py && python -m http.server -d site
+```
+
+The FastAPI server is unchanged and still runs live agent runs locally.
+
 ### Replaying a recorded run (no API key, no cost)
 
 A run costs ~$0.10, and iterating on the UI usually needs several looks at a

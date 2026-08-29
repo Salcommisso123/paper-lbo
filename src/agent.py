@@ -60,6 +60,9 @@ MAX_TOKENS = int(os.environ.get("LBO_AGENT_MAX_TOKENS", "3000"))
 # (the optional upside case, which the memo labels separately).
 MAX_BASE_RUNS = int(os.environ.get("LBO_AGENT_MAX_BASE_RUNS", "2"))
 MAX_ALT_RUNS = int(os.environ.get("LBO_AGENT_MAX_ALT_RUNS", "1"))
+# How many times the figure audit may block a memo before the file is written anyway.
+# Each rejection costs a full memo rewrite in output tokens, so this is a real budget.
+MEMO_AUDIT_BLOCKS = int(os.environ.get("LBO_AGENT_MEMO_AUDIT_BLOCKS", "2"))
 MAX_TURNS = int(os.environ.get("LBO_AGENT_MAX_TURNS", "12"))  # hard stop so a confused loop can't burn budget
 # Raised from 8 when verify_financials / get_industry_benchmarks / get_management_discussion
 # were added — a full run is now ~8 tool calls and 8 turns cut the memo off.
@@ -513,15 +516,18 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
         audit = audit_memo(tool_input["memo_text"], state.tool_values, labelled)
         state.memo_audit = audit
         state.memo_audit_attempts += 1
-        if not audit["clean"] and state.memo_audit_attempts == 1:
+        if not audit["clean"] and state.memo_audit_attempts <= MEMO_AUDIT_BLOCKS:
+            left = MEMO_AUDIT_BLOCKS - state.memo_audit_attempts   # blocks still to come
             return {
                 "error": "Memo figure audit failed — file NOT written.",
                 "audit": audit,
+                "attempts_remaining": left,
                 "guidance": "Fix each figure listed. 'mislabelled' means the number is "
                             "attached to the wrong quantity (e.g. citing EBITDA as cash) — "
                             "use the expected value shown. 'untraceable' means no tool "
                             "returned that number — correct it, or remove the claim. Then "
-                            "call write_excel_and_memo again with the corrected memo.",
+                            "call write_excel_and_memo again with the corrected memo. "
+                            f"{left} attempt(s) remain before the file is written as-is.",
             }
 
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -535,7 +541,17 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
         save_workbook(wb, str(out_path))
         state.saved_to = str(out_path)
         state.memo_text = tool_input["memo_text"]
-        return {"saved_to": str(out_path), "memo_audit": audit}
+        written = {"saved_to": str(out_path), "memo_audit": audit}
+        if not audit["clean"]:
+            # Without this the loop never terminates: the file is written, but a
+            # clean=False audit reads as "still broken", so Claude rewrites the memo and
+            # calls again — each cycle costing a full memo in output tokens.
+            written["notice"] = (
+                f"WRITTEN with {len(audit['mislabelled']) + len(audit['untraceable'])} "
+                "unresolved figure finding(s); the audit budget is spent. Do NOT call "
+                "write_excel_and_memo again. Tell the user which figures are unresolved "
+                "in your closing summary instead.")
+        return written
 
     return {"error": f"Unknown tool {name}"}
 

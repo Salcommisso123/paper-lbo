@@ -364,3 +364,54 @@ def test_refusal_tells_the_agent_what_to_do_instead():
     _propose(s, 6.5, 6.5); _propose(s, 5.5, 5.5)
     refused = _propose(s, 5.0, 5.0)
     assert "legitimate finding" in refused["guidance"]
+
+
+# ---- memo audit retry budget -------------------------------------------------
+
+def _writable_state(tmp_result=True):
+    from edgar import CompanyFinancials, FiscalYearFinancials
+    from lbo_engine import run_lbo
+    s = _priced_state()
+    a = agent_mod._assumptions_from_tool_input(
+        {"entry_ev_multiple": 6.0, "exit_ev_multiple": 6.0, "hold_period_years": 5,
+         "leverage_multiple": 3.0, "revenue_growth_rate": 0.0})
+    r = run_lbo(LTM_REV, LTM_EBITDA, a)
+    s.assumptions, s.result = a, r
+    s.runs.append({"assumptions": a, "result": r})
+    s.tool_values = {LTM_REV, LTM_EBITDA}
+    return s
+
+
+BAD_MEMO = "Sponsor equity of $17M and an exit value of $528M."
+
+
+def test_audit_blocks_then_writes_but_tells_the_agent_to_stop(tmp_path):
+    """
+    The loop this guards: the audit blocked once, then wrote the file while still
+    reporting clean=False. Claude read that as "still broken", rewrote the memo and
+    called again — four writes in one real run, each costing a full memo in output
+    tokens. The final write must terminate the loop explicitly.
+    """
+    s = _writable_state()
+    call = lambda: agent_mod.execute_tool("write_excel_and_memo",
+        {"memo_text": BAD_MEMO, "output_filename": "T.xlsx"}, s, tmp_path)
+
+    first = call()
+    assert "error" in first and first["attempts_remaining"] == 1
+
+    second = call()
+    assert "error" in second and second["attempts_remaining"] == 0
+
+    third = call()                                   # budget spent — writes anyway
+    assert "saved_to" in third
+    assert third["memo_audit"]["clean"] is False
+    assert "Do NOT call write_excel_and_memo again" in third["notice"]
+
+
+def test_clean_memo_writes_first_time_with_no_notice(tmp_path):
+    s = _writable_state()
+    memo = f"LTM revenue was ${LTM_REV/1e6:,.0f}M and EBITDA ${LTM_EBITDA/1e6:,.0f}M."
+    out = agent_mod.execute_tool("write_excel_and_memo",
+        {"memo_text": memo, "output_filename": "T.xlsx"}, s, tmp_path)
+    assert "saved_to" in out and out["memo_audit"]["clean"] is True
+    assert "notice" not in out

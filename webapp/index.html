@@ -577,7 +577,8 @@ function renderResults(s){
 
   if(s.download){
     const d=$("download");
-    d.href=`/download/${encodeURIComponent(s.download)}`;
+    d.href = STATIC ? `files/${encodeURIComponent(s.download)}`
+                    : `/download/${encodeURIComponent(s.download)}`;
     d.classList.remove("hidden"); d.classList.add("flex");
     $("download-idle").classList.add("hidden");
   }
@@ -588,22 +589,27 @@ function renderResults(s){
 }
 
 /* ── run lifecycle ──────────────────────────────────────── */
+const IDLE_LABEL = () => (typeof STATIC !== "undefined" && STATIC) ? "Replay" : "Build model";
 function setRunning(on){
   running=on;
   runBtn.disabled=on;
   spinner.classList.toggle("hidden",!on);
   liveDot.classList.toggle("hidden",!on);
-  runLabel.textContent = on ? "Building…" : "Build model";
+  runLabel.textContent = on ? (IDLE_LABEL()==="Replay" ? "Replaying…" : "Building…") : IDLE_LABEL();
 }
 // ?replay=SHOE streams a recorded run from webapp/fixtures instead of calling the
 // API — free, and it exercises this exact renderer, so the UI can be built and
 // screenshotted without credits. ?delay= controls pacing (0 for an instant render).
 const REPLAY = new URLSearchParams(location.search).get("replay");
+// The static build (GitHub Pages) sets window.PAPERLBO_STATIC to the fixture names it
+// ships. With no backend there is no SSE endpoint, so a replay is fetched and paced in
+// the browser instead — same events, same renderer, only the transport differs.
+const STATIC = Array.isArray(window.PAPERLBO_STATIC) ? window.PAPERLBO_STATIC : null;
 const REPLAY_DELAY = new URLSearchParams(location.search).get("delay");
 
 function start(){
-  const ticker=input.value.trim().toUpperCase();
-  if((!ticker && !REPLAY) || running) return;
+  const ticker = input.isConnected ? input.value.trim().toUpperCase() : "";
+  if((!ticker && !REPLAY && !STATIC) || running) return;
   if(es) es.close();
   t0=Date.now(); summary=null;
   log.innerHTML=""; banner.classList.add("hidden"); banner.innerHTML="";
@@ -625,9 +631,21 @@ function start(){
   const qs = REPLAY
     ? `replay=${encodeURIComponent(REPLAY)}` + (REPLAY_DELAY!==null ? `&delay=${encodeURIComponent(REPLAY_DELAY)}` : "")
     : `ticker=${encodeURIComponent(ticker)}`;
+  if(STATIC){ replayStatic(STATIC.includes(REPLAY) ? REPLAY : STATIC[0]); return; }
+
   es=new EventSource(`/api/stream?${qs}`);
   es.onmessage=(e)=>{
     let ev; try{ ev=JSON.parse(e.data); }catch{ return; }
+    handleEvent(ev);
+  };
+  es.onerror=()=>{
+    if(!running) return;           // already finished cleanly via "done"
+    es.close(); setRunning(false);
+    appendNote("Connection closed before the run finished.");
+  };
+}
+
+function handleEvent(ev){
     eventT = (typeof ev.t === "number") ? ev.t : null;
     switch(ev.type){
       case "assistant":  appendAssistant(ev.text); break;
@@ -640,27 +658,83 @@ function start(){
         if(ev.cost_usd!=null) $("cost-chip").textContent=`≈ $${ev.cost_usd.toFixed(3)}/run`;
         break;
       }
-      case "done":  es.close(); setRunning(false); renderResults(ev.summary); break;
+      case "done":  if(es) es.close();   // null in static replay — there is no stream
+                    setRunning(false); renderResults(ev.summary); break;
       case "error":
-        es.close(); setRunning(false);
+        if(es) es.close();
+        setRunning(false);
         appendNote("Error: "+ev.message);
         banner.classList.remove("hidden");
         banner.innerHTML=`<div class="fade-up rounded-2xl border border-danger/30 bg-danger/[.08] p-4 text-sm text-red-200">
           <span class="font-semibold">Run failed.</span> ${esc(ev.message)}</div>`;
         break;
     }
-  };
-  // A normal end-of-stream (or a network drop) fires onerror. We always end the run
-  // here so EventSource never silently reconnects and re-runs the agent.
-  es.onerror=()=>{
-    if(!running) return;           // already finished cleanly via "done"
-    es.close(); setRunning(false);
-    appendNote("Connection closed before the run finished.");
-  };
+}
+
+// Replay a recorded run entirely client-side. Paced by each event's real elapsed time,
+// compressed into a few seconds so a visitor sees the run unfold without waiting out
+// the original 90 seconds.
+const REPLAY_SECONDS = 9;
+async function replayStatic(name){
+  let events;
+  try{
+    const res = await fetch(`fixtures/${encodeURIComponent(name)}.json`, {cache: "no-cache"});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    events = await res.json();
+  }catch(err){
+    setRunning(false);
+    handleEvent({type:"error", message:`Could not load the recorded run '${name}' (${err.message}).`});
+    return;
+  }
+  events = events.filter(e => e.type !== "_meta" && e.type !== "tool_result");
+  const span = Math.max(...events.map(e => e.t || 0), 0);
+  const scale = span > 0 ? REPLAY_SECONDS / span : 0;
+  let previous = 0;
+  for(const ev of events){
+    const gap = scale ? Math.min((ev.t || 0) - previous, span) * scale * 1000 : 260;
+    previous = ev.t || previous;
+    if(gap > 0) await new Promise(r => setTimeout(r, gap));
+    handleEvent(ev);
+  }
 }
 form.addEventListener("submit",(e)=>{ e.preventDefault(); start(); });
 
-if(REPLAY){
+if(STATIC){
+  // No backend here, so free-text tickers can't be run. Offer exactly the recorded
+  // runs that shipped, and make the controls say what they actually do.
+  const current = STATIC.includes(REPLAY) ? REPLAY : STATIC[0];
+  input.closest("div").remove();
+  runBtn.title = "Replay the selected recorded run";
+  runBtn.addEventListener("click", (e) => { e.preventDefault(); start(); });
+
+  const strip = document.querySelector(".ex").parentElement;
+  strip.innerHTML = `<span>Recorded runs</span>`;
+  STATIC.forEach(name => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.name = name;
+    b.className = "ex rounded-lg border px-2 py-1 font-mono font-semibold transition "
+      + (name === current ? "border-lime/60 text-lime" : "border-white/[.08] hover:border-lime/50 hover:text-lime");
+    b.textContent = name;
+    b.addEventListener("click", () => {
+      if(running) return;
+      history.replaceState(null, "", `?replay=${name}`);
+      location.reload();          // simplest correct reset of every panel
+    });
+    strip.appendChild(b);
+  });
+  const caption = document.createElement("span");
+  caption.className = "hidden sm:inline";
+  caption.textContent = "— real runs against SEC filings, recorded and replayed. No API key, no cost.";
+  strip.appendChild(caption);
+
+  const note = document.createElement("span");
+  note.className = "rounded-lg border border-white/[.12] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted";
+  note.textContent = "replay · recorded run";
+  note.title = `Replaying fixtures/${current}.json — no API call.`;
+  document.querySelector("#form").prepend(note);
+  start();
+} else if(REPLAY){
   // Say so on screen — a recorded run must never be mistaken for a live one.
   input.value = REPLAY;
   const note = document.createElement("span");

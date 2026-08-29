@@ -4,7 +4,7 @@
   "recorded_at": "2026-08-29T15:18:19+00:00",
   "ticker": "SHOE",
   "model": "claude-haiku-4-5",
-  "note": "Assembled, not captured by tools/record_run.py. The assistant prose and tool calls are verbatim from a real live run (2026-08-29); the summary was recomputed from the same SEC data and the same assumptions with the deterministic engine, so the numbers are identical to that run's. Re-record with tools/record_run.py --ticker SHOE to replace it with a verbatim capture."
+  "note": "Assembled, not captured by tools/record_run.py. The assistant prose and tool calls are verbatim from a real live run (2026-08-29); the summary was recomputed from the same SEC data and the same assumptions with the deterministic engine, so the numbers are identical to that run's. Re-record with tools/record_run.py --ticker SHOE to replace it with a verbatim capture. CLI banner text mistakenly captured as assistant output during assembly has been removed."
  },
  {
   "type": "assistant",
@@ -114,10 +114,6 @@
   "input_tokens": 59855,
   "output_tokens": 6267,
   "model": "claude-haiku-4-5"
- },
- {
-  "type": "assistant",
-  "text": "Check current per-token pricing for your configured model at https://docs.claude.com/en/docs/about-claude/models and set a spend limit in the Anthropic Console so a run can never surprise-bill you."
  },
  {
   "type": "done",
