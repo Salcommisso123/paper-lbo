@@ -26,8 +26,9 @@ you back a workbook.
 
 ## A real run: SHOE (Shoe Station Group, formerly Shoe Carnival)
 
-Built live from SEC EDGAR with the agent running on Claude Haiku 4.5 (~3.5¢ in
-API cost). Workbook: [`examples/real_output/SHOE_LBO_Model.xlsx`](examples/real_output/SHOE_LBO_Model.xlsx).
+Built live from SEC EDGAR with the agent running on Claude Haiku 4.5
+(≈$0.10 in API cost — see [Cost](#cost)). Workbook:
+[`examples/real_output/SHOE_LBO_Model.xlsx`](examples/real_output/SHOE_LBO_Model.xlsx).
 
 | | |
 | --- | --- |
@@ -207,11 +208,29 @@ labeled as illustrative, not a real filer.
 
 ## Cost
 
-See `docs/COST_CONTROL.md`. Short version: SEC EDGAR is free, the only real
-cost is Claude API usage (a few cents per run at typical token volumes), the
-agent has a hard turn cap so it can't loop forever, and every run prints its
-own token usage so nothing is a surprise. Set a spend limit in the Anthropic
-Console before you start using this for real.
+SEC EDGAR, the Damodaran datasets and SEC full-text search are all free. The
+only real cost is Claude API usage. Measured on Claude Haiku 4.5, the default:
+
+| Run | Input / output tokens | Cost |
+| --- | --- | --- |
+| Full SHOE model | 53K–93K / 4.0K–11.9K | **$0.07 – $0.15** |
+| FLWS refusal (stops at bad data) | 4.6K / 0.5K | $0.007 |
+
+Budget **~$0.10 for a typical complete run**. That is up from ~$0.035 before the
+verification tooling was added — cross-checking the figures, pulling sector
+benchmarks and quoting the 10-K MD&A roughly tripled token usage, and the MD&A
+excerpts are the largest single contributor. The top of the range is a run where
+the memo figure audit rejected the first draft and the agent rewrote it: correctness
+costs an extra turn, on purpose.
+
+Sonnet 5 is roughly 3x Haiku's rate on the same token counts, so ~$0.30/run —
+worth it for the version you actually send to a recruiter, not for iterating.
+
+The guardrails: a hard turn cap (`LBO_AGENT_MAX_TURNS`, default 12) so a confused
+loop can't spiral, a per-response cap (`LBO_AGENT_MAX_TOKENS`), and every run
+prints its own token usage and estimated cost so nothing is a surprise. Details
+and per-model rates in [`docs/COST_CONTROL.md`](docs/COST_CONTROL.md). Set a spend
+limit in the Anthropic Console before you start using this for real.
 
 ## Project layout
 

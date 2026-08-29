@@ -19,17 +19,22 @@ Anthropic API key — nothing recurring, nothing that charges you without a
 run happening.
 
 Concretely, per run:
-- A handful of tool-use turns (typically 3-6), each sending the running
-  conversation plus tool results. At typical model context sizes for this
-  task (a company's recent financials + a model's worth of projections),
-  a single run is a small number of cents, not dollars — but check current
-  per-token pricing for whatever model you configure, since it's not baked
-  into this repo (rates change): https://docs.claude.com/en/docs/about-claude/models
+- A handful of tool-use turns (typically 6-9 now that the verification,
+  benchmark and MD&A tools run before the memo), each sending the running
+  conversation plus tool results. A complete run measured 53K-93K input and
+  4.0K-11.9K output tokens — about $0.07-$0.15 on Haiku 4.5, so cents rather
+  than dollars, but roughly 3x what it was before those tools existed. Check
+  current per-token pricing for whatever model you configure, since it's not
+  baked into this repo (rates change):
+  https://docs.claude.com/en/docs/about-claude/models
+- The MD&A excerpts are the single largest contributor to input tokens. If you
+  need runs cheaper, that is the first thing to trim — `filings.py` caps them at
+  `MAX_EXCERPT_CHARS`.
 - `agent.py` prints total input/output tokens used at the end of every run,
   so you always see exactly what a run cost before you run it again.
-- `LBO_AGENT_MAX_TURNS` (default 8) hard-stops the tool-use loop even if
-  something goes wrong — an 8-turn run costs at most 8x a single call, it
-  can't spiral.
+- `LBO_AGENT_MAX_TURNS` (default 12, raised from 8 when the grounding tools
+  were added) hard-stops the tool-use loop even if something goes wrong — a
+  12-turn run costs at most 12x a single call, it can't spiral.
 - `LBO_AGENT_MAX_TOKENS` (default 3000) caps the size of each individual
   response.
 
@@ -42,22 +47,26 @@ deterministic Python, so the model choice only affects the *prose* and the
 
 | Model | ID (`LBO_AGENT_MODEL`) | Input / Output per 1M tok | Approx. cost per run* |
 | --- | --- | --- | --- |
-| **Haiku 4.5** (default) | `claude-haiku-4-5` | $1 / $5 | **~$0.035** |
-| Sonnet 5 | `claude-sonnet-5` | $3 / $15 (intro $2 / $10 thru 2026-08-31) | ~$0.10 |
-| Opus 4.8 | `claude-opus-4-8` | $5 / $25 | ~$0.17 |
+| **Haiku 4.5** (default) | `claude-haiku-4-5` | $1 / $5 | **~$0.10** |
+| Sonnet 5 | `claude-sonnet-5` | $3 / $15 (intro $2 / $10 thru 2026-08-31) | ~$0.31 (~$0.20 at the intro rate) |
+| Opus 4.8 | `claude-opus-4-8` | $5 / $25 | ~$0.51 |
 
-\* Based on a measured real run: SHOE on Haiku 4.5 used ~19.8K input + ~3.1K
-output tokens across its tool-use turns. Sonnet/Opus token counts are similar;
-the cost scales with the per-token rate.
+\* Rates above x a measured run: SHOE on Haiku 4.5 used 67.4K input + 7.0K output
+tokens across its tool-use turns. Sonnet/Opus token counts are similar; the cost
+scales with the per-token rate. Runs range $0.07-$0.15 on Haiku depending on how
+many times the agent revises — the top of that range is a run where the memo
+figure audit rejected the first draft and it rewrote the memo.
 
-**Recommendation: default to Haiku 4.5.** On a live SHOE run it fetched the
-data, proposed and justified reasonable assumptions, correctly flagged a
-below-hurdle IRR, and wrote a clean memo — for about 3.5 cents. That's the
+**Recommendation: default to Haiku 4.5.** On live SHOE runs it fetched the data,
+proposed and justified reasonable assumptions against sector benchmarks, correctly
+flagged a below-hurdle IRR, and wrote a clean memo — for about 10 cents. That's the
 default baked into `agent.py`.
 
 **Step up to Sonnet 5 for the polished version you actually send to a
-recruiter** — noticeably better prose and slightly sharper assumption judgment,
-still only ~10 cents/run: `LBO_AGENT_MODEL=claude-sonnet-5 python src/agent.py --ticker <T>`.
+recruiter** — noticeably better prose and slightly sharper assumption judgment, at
+roughly 3x the cost (~$0.31/run, or ~$0.20 while the introductory rate lasts):
+`LBO_AGENT_MODEL=claude-sonnet-5 python src/agent.py --ticker <T>`. Iterate on
+Haiku, do the final run on Sonnet.
 Opus 4.8 is available if you want the strongest reasoning, but it's overkill for
 a paper LBO — the memo quality gain over Sonnet 5 doesn't justify the cost here.
 
