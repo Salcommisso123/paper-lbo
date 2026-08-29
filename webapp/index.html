@@ -294,8 +294,15 @@ const fmtUSD=(n)=>{ if(n==null||isNaN(n)) return "—";
 const fmtPct =(x)=> x==null||isNaN(x) ? "—" : `${(x*100).toFixed(1)}%`;
 const fmtMult=(x)=> x==null||isNaN(x) ? "—" : `${x.toFixed(2)}x`;
 const esc=(s)=>(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const elapsed=()=>{ const s=Math.floor((Date.now()-t0)/1000);
-  return `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`; };
+// Elapsed time for a log row. A replayed fixture carries the run's real `t`; if it
+// has none, show nothing rather than a wall of misleading 00:00s.
+let eventT = null;
+const mmss=(s)=>`${String(Math.floor(s/60)).padStart(2,"0")}:${String(Math.floor(s%60)).padStart(2,"0")}`;
+const elapsed=()=>{
+  if(eventT != null) return mmss(eventT);
+  if(REPLAY) return "";
+  return mmss((Date.now()-t0)/1000);
+};
 
 const TOOL_LABEL = {
   get_company_financials: "Fetching SEC financials",
@@ -588,9 +595,15 @@ function setRunning(on){
   liveDot.classList.toggle("hidden",!on);
   runLabel.textContent = on ? "Building…" : "Build model";
 }
+// ?replay=SHOE streams a recorded run from webapp/fixtures instead of calling the
+// API — free, and it exercises this exact renderer, so the UI can be built and
+// screenshotted without credits. ?delay= controls pacing (0 for an instant render).
+const REPLAY = new URLSearchParams(location.search).get("replay");
+const REPLAY_DELAY = new URLSearchParams(location.search).get("delay");
+
 function start(){
   const ticker=input.value.trim().toUpperCase();
-  if(!ticker||running) return;
+  if((!ticker && !REPLAY) || running) return;
   if(es) es.close();
   t0=Date.now(); summary=null;
   log.innerHTML=""; banner.classList.add("hidden"); banner.innerHTML="";
@@ -609,9 +622,13 @@ function start(){
   drawChart(null);
   setRunning(true);
 
-  es=new EventSource(`/api/stream?ticker=${encodeURIComponent(ticker)}`);
+  const qs = REPLAY
+    ? `replay=${encodeURIComponent(REPLAY)}` + (REPLAY_DELAY!==null ? `&delay=${encodeURIComponent(REPLAY_DELAY)}` : "")
+    : `ticker=${encodeURIComponent(ticker)}`;
+  es=new EventSource(`/api/stream?${qs}`);
   es.onmessage=(e)=>{
     let ev; try{ ev=JSON.parse(e.data); }catch{ return; }
+    eventT = (typeof ev.t === "number") ? ev.t : null;
     switch(ev.type){
       case "assistant":  appendAssistant(ev.text); break;
       case "tool_call":  appendTool(ev.name, ev.input); break;
@@ -642,6 +659,17 @@ function start(){
   };
 }
 form.addEventListener("submit",(e)=>{ e.preventDefault(); start(); });
+
+if(REPLAY){
+  // Say so on screen — a recorded run must never be mistaken for a live one.
+  input.value = REPLAY;
+  const note = document.createElement("span");
+  note.className = "rounded-lg border border-white/[.12] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted";
+  note.textContent = "replay · recorded run";
+  note.title = "Streaming webapp/fixtures/" + REPLAY + ".json — no API call.";
+  document.querySelector("#form").prepend(note);
+  start();
+}
 document.querySelectorAll(".ex").forEach(b=>b.addEventListener("click",()=>{
   input.value=b.textContent; if(!running) start();
 }));

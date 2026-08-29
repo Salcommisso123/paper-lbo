@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -36,6 +37,7 @@ import agent  # noqa: E402  (import after sys.path + dotenv setup)
 
 OUT_DIR = REPO / "output"
 INDEX_PATH = ROOT / "index.html"
+FIXTURE_DIR = ROOT / "fixtures"
 
 # $ per 1M tokens (input, output) — keep in sync with docs/COST_CONTROL.md.
 PRICING = {
@@ -59,12 +61,43 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, default=str)}\n\n"
 
 
+def _replay_events(name: str, delay: float):
+    """
+    Stream a recorded run from webapp/fixtures/ instead of calling the API.
+
+    Exists so the UI can be developed and screenshotted without spending API
+    credits — a real run costs ~$0.10 and a layout usually needs several looks.
+    Basename-only, to keep the path inside the fixture directory.
+    """
+    path = FIXTURE_DIR / f"{Path(name).stem}.json"
+    if not path.exists():
+        available = sorted(p.stem for p in FIXTURE_DIR.glob("*.json")) if FIXTURE_DIR.exists() else []
+        yield _sse({"type": "error",
+                    "message": f"No fixture '{name}'. Available: {', '.join(available) or 'none'}."})
+        return
+    for ev in json.loads(path.read_text()):
+        if ev.get("type") == "_meta":
+            continue                      # provenance header, not a UI event
+        if ev.get("type") == "usage":
+            ev["cost_usd"] = _estimate_cost(ev)
+        yield _sse(ev)
+        if delay:
+            time.sleep(delay)             # let the UI animate the way it does live
+
+
 @app.get("/api/stream")
-def stream(ticker: str = ""):
-    """SSE endpoint: run the agent for `ticker` and stream its events."""
+def stream(ticker: str = "", replay: str = "", delay: float = 0.12):
+    """
+    SSE endpoint: run the agent for `ticker` and stream its events.
+
+    `replay=<fixture>` streams a recorded run instead — no API call, no cost.
+    """
     ticker = (ticker or "").strip().upper()
 
     def gen():
+        if replay:
+            yield from _replay_events(replay, max(0.0, min(delay, 2.0)))
+            return
         if not ticker:
             yield _sse({"type": "error", "message": "Enter a ticker symbol."})
             return

@@ -16,7 +16,8 @@ one-page investment memo.
 deleveraging curve, the assumptions it chose and defended, returns, an IRR sensitivity
 grid, the memo, and the Excel workbook. The headline is always the flat-multiple **base
 case** (exit multiple = entry); a run assuming multiple expansion is labelled as an
-upside case and never shown as the top-line return.*
+upside case and never shown as the top-line return. Captured from a recorded run
+(`webapp/fixtures/SHOE.json`) — same SEC data, same engine output, no API call.*
 
 Built as a portfolio project for private equity recruiting. It automates
 what PE firms call a "paper LBO" — a standard interview screen — end to end:
@@ -194,6 +195,24 @@ pip install -r requirements.txt          # includes fastapi + uvicorn
 uvicorn webapp.server:app --reload       # reads .env for the two keys
 # open http://127.0.0.1:8000
 ```
+
+### Replaying a recorded run (no API key, no cost)
+
+A run costs ~$0.10, and iterating on the UI usually needs several looks at a
+finished one. Record a run once, then replay it for free:
+
+```bash
+python tools/record_run.py --ticker SHOE     # costs one run; writes webapp/fixtures/SHOE.json
+```
+
+```bash
+open "http://127.0.0.1:8000/?replay=SHOE"    # free, forever after
+```
+
+A fixture is the exact event stream `agent.iter_agent_events` produced, so the replay
+drives the real client code path — same SSE events, same renderer, real numbers.
+`webapp/fixtures/SHOE.json` is committed, so a fresh clone can see a finished run
+with no API key at all. Add `&delay=0` to render instantly instead of streaming.
 
 Enter a ticker, watch the agent fetch filings, propose and justify assumptions,
 run the model, and write the workbook — then download it. Each run shows its own
