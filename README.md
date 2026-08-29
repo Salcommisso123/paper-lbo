@@ -55,6 +55,9 @@ ticker
   ▼
 edgar.py  ───────────►  SEC EDGAR (data.sec.gov, free, no key)
   │  pulls 10-K XBRL tags, computes LTM EBITDA, flags bad/missing data
+  ├─ verify.py    ───►  cross-checks those figures & resolves the fiscal-year period
+  ├─ benchmarks.py───►  NYU Stern / Damodaran sector multiples & margins (free, no key)
+  ├─ filings.py   ───►  Item 7 MD&A via SEC full-text search — management's own words
   ▼
 agent.py  ───────────►  Claude (tool-use loop)
   │  picks & justifies assumptions, calls lbo_engine as a tool,
@@ -73,6 +76,68 @@ assumptions to try, whether the result looks sane) and it writes English
 which is plain, tested Python. That's what makes the output auditable
 instead of "an LLM said so" — see `tests/test_lbo_engine.py`, which checks
 the engine against a hand-calculated example.
+
+## Grounding: what stops the memo from drifting off the data
+
+Three tools run before the memo is written, all free and key-less:
+
+**`verify_financials`** cross-checks the figures the model is about to use, and
+resolves *which period* a fiscal-year label actually covers. This exists because of a
+real audit finding: a memo cited FY2021 revenue of $1.33B against a third-party
+source showing ~$977M. Both were right — they are different periods.
+
+> SEC labels a fiscal year by the year it **starts**. Shoe Carnival's `fy=2021` runs
+> 2021-01-31 → 2022-01-29 ($1.33B). Most data providers label by the year it **ends**
+> and call that same period FY2022; their "FY2021" is the prior COVID year (~$977M).
+
+For any non-December year-end the two conventions are a full year apart. The tool now
+surfaces the period end date, flags the ambiguity, and the system prompt requires the
+memo to cite the end date alongside the label. It also compares revenue across
+alternate XBRL tags, recomputes EBITDA by a second independent path, and checks
+whether a figure was restated between filings — reporting both numbers and a flag for
+anything more than ~5% apart, rather than silently picking one.
+
+Its limitation is worth stating plainly: every check is SEC-sourced, so it cannot
+detect an error in SEC's own data. A true second opinion needs a third-party vendor;
+`verify._third_party_check` is the seam for one.
+
+**`audit_memo` (in `memo_audit.py`)** runs deterministically *before* the workbook is
+written and blocks it if the prose doesn't hold up. Two checks, because one isn't enough:
+
+1. **Traceability** — does every `$` figure in the memo match a number some tool
+   actually returned? Catches invented values.
+2. **Label match** — is the figure next to the word "cash" actually the cash value?
+
+The second exists because of a real failure. A memo said *"Net cash position of ~$9M
+($101M cash - $0M debt)"* — $101M is EBITDA; cash was $117M. **A pure traceability check
+passes that**, because $101M is a genuine tool value; it's just the wrong one. A figure
+can be perfectly traceable and still lie about what it measures.
+
+False positives are controlled by construction rather than by loosening: tolerance
+follows the written precision (`$1.1B` accepts `$1,135,324,000`, `$9M` does not accept
+`$117M`), each label is checked against its whole time series so "exit EBITDA" isn't
+judged against LTM EBITDA, label context stops at line boundaries, and the nearest
+label by edge distance wins so `$0M debt` binds to *debt*, not the *cash* earlier on the
+same line. On a real 21-figure memo it reports clean; with the bug reintroduced it
+catches both the mislabelled `$101M` and the invented `$9M`.
+
+A failed audit blocks the write once and hands Claude the specific figures to fix. A
+second attempt writes the file but carries the findings into the run summary, so a
+problem is surfaced rather than silently buried.
+
+**`get_industry_benchmarks`** replaces a hardcoded "6-9x" heuristic with real
+sector EV/EBITDA and margin data from
+[Damodaran's datasets](https://pages.stern.nyu.edu/~adamodar/New_Home_Page/data.html).
+These are *public trading* multiples for minority stakes — a control LBO of a small,
+declining target prices well below them — so the prompt uses them as a reference to
+explain the entry multiple **against**, never a target to match.
+
+**`get_management_discussion`** pulls Item 7 MD&A excerpts via SEC full-text search,
+so the memo's narrative quotes what management actually said drove results instead of
+a plausible-sounding inference.
+
+All three are best-effort: if a source is down, the tool returns a status, the agent
+notes the gap in the memo, and the run continues.
 
 ## Setup
 
@@ -105,6 +170,25 @@ Run the tests (fully offline, no API key or network needed):
 python -m pytest tests/ -v
 ```
 
+## Web UI
+
+A dark dashboard front end (`webapp/`): a ticker input, the agent's live
+reasoning streaming in as it works, a deleveraging chart, the deal assumptions it
+chose, the returns, an IRR sensitivity heatmap, the memo, and a downloadable Excel
+model. It's a thin layer over the same tool-use loop the CLI runs
+(`agent.iter_agent_events`) — no calculation logic is duplicated, and every number
+on screen is passed straight through from `lbo_engine`.
+
+```bash
+pip install -r requirements.txt          # includes fastapi + uvicorn
+uvicorn webapp.server:app --reload       # reads .env for the two keys
+# open http://127.0.0.1:8000
+```
+
+Enter a ticker, watch the agent fetch filings, propose and justify assumptions,
+run the model, and write the workbook — then download it. Each run shows its own
+token usage and estimated cost.
+
 ## What's in `examples/sample_output/`
 
 A fully worked example workbook (`Example_Industrial_Services_LBO_Model.xlsx`)
@@ -125,12 +209,18 @@ Console before you start using this for real.
 ```
 src/
   edgar.py         SEC EDGAR fetch + parse (no LBO logic)
+  verify.py         independent cross-checks + fiscal-period resolution
+  benchmarks.py     NYU Stern / Damodaran sector benchmarks
+  filings.py        10-K MD&A retrieval via SEC full-text search
+  memo_audit.py     blocks the write if a memo figure is invented or mislabelled
   lbo_engine.py     deterministic LBO math (no LLM, no data-fetching)
   excel_writer.py   formats an LBOResult into a .xlsx workbook
   agent.py          the Claude tool-use loop that ties the above together
 tests/
   test_lbo_engine.py    engine checked against hand-calculated numbers
   test_edgar_parser.py  SEC JSON parsing checked against a saved fixture
+  test_verification.py  fiscal-year labelling, industry matching, MD&A parsing,
+                        memo figure audit (incl. the exact audited bug)
 examples/
   generate_demo.py      builds the sample workbook with no API key needed
 docs/

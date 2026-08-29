@@ -40,16 +40,22 @@ import anthropic
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from benchmarks import get_industry_benchmarks  # noqa: E402
 from edgar import CompanyFinancials, fetch_company_financials  # noqa: E402
+from filings import get_management_discussion  # noqa: E402
 from excel_writer import build_workbook, save_workbook  # noqa: E402
 from lbo_engine import DebtTranche, LBOAssumptions, run_lbo, sensitivity_grid  # noqa: E402
+from memo_audit import audit_memo, build_labelled_values, collect_values  # noqa: E402
+from verify import verify_financials  # noqa: E402
 
 # Default to Haiku 4.5 — the cheapest current model, and it produces a solid memo
 # (~3.5 cents/run at typical token volumes). Bump to a stronger model via LBO_AGENT_MODEL
 # for the polished version you send to a recruiter. See docs/COST_CONTROL.md.
 MODEL = os.environ.get("LBO_AGENT_MODEL", "claude-haiku-4-5")
 MAX_TOKENS = int(os.environ.get("LBO_AGENT_MAX_TOKENS", "3000"))
-MAX_TURNS = int(os.environ.get("LBO_AGENT_MAX_TURNS", "8"))  # hard stop so a confused loop can't burn budget
+MAX_TURNS = int(os.environ.get("LBO_AGENT_MAX_TURNS", "12"))  # hard stop so a confused loop can't burn budget
+# Raised from 8 when verify_financials / get_industry_benchmarks / get_management_discussion
+# were added — a full run is now ~8 tool calls and 8 turns cut the memo off.
 
 SYSTEM_PROMPT = """\
 You are a junior private equity associate automating a "quick look" / paper LBO \
@@ -62,17 +68,38 @@ Workflow:
 1. Call get_company_financials for the ticker the user gave you.
 2. If EBITDA is missing, negative, or the data-quality flags say the data is bad, \
 tell the user plainly that this isn't a clean LBO candidate and stop — do not force a model.
-3. Propose deal assumptions using standard lower-middle/mid-market heuristics, and \
-briefly justify each choice by referencing the company's actual revenue size, margin, \
-and growth from step 1:
-   - Entry EV/EBITDA multiple: roughly 6-9x for smaller, less differentiated businesses; \
-higher for larger, more stable, higher-margin ones.
+2b. Call verify_financials. It cross-checks the figures you are about to model and \
+resolves which PERIOD a fiscal-year label actually refers to. Treat its output as \
+mandatory memo content, not optional colour:
+   - If it reports a discrepancy, say so explicitly in the memo, give BOTH numbers, and \
+state which one the model uses and why. Never silently pick one.
+   - SEC labels a fiscal year by the year it STARTS. Retailers and other non-December \
+year-ends are therefore labelled a full year apart from how most data providers label \
+them. Whenever you cite a fiscal year for such a company, give the period END DATE \
+alongside it (e.g. "FY2025, the year ended 2026-01-31"). A reader comparing your memo \
+against a third-party source will otherwise think the number is wrong when it is not.
+   - Its checks are all SEC-sourced, so they cannot detect an error in SEC's own data. \
+Do not claim the figures are independently confirmed.
+2c. Call get_industry_benchmarks with the company's sector to get real EV/EBITDA and \
+margin averages for that industry. If the match looks wrong, retry once with an exact \
+name from the list it returns.
+3. Propose deal assumptions and justify each choice against the company's actual revenue \
+size, margin, and growth from step 1 AND the sector benchmarks from step 2c:
+   - Entry EV/EBITDA multiple: cite the benchmark range for this company's sector \
+explicitly in your justification. Those benchmarks are PUBLIC TRADING multiples for \
+minority stakes across a whole sector — an LBO entry price for control of one small, \
+slow-growing company normally sits well BELOW them. So use the benchmark as the \
+reference point you explain your entry multiple AGAINST; do not move the multiple up to \
+match it. State the gap and the reason for it (scale, growth, margin, cyclicality). \
+As a sanity range, 6-9x is typical for smaller, less differentiated businesses.
    - Leverage: roughly 3-4x EBITDA for smaller/cyclical/lower-margin businesses, \
 4.5-5.5x for larger/stable/higher-margin ones. Never propose leverage that implies \
 Year-1 interest expense anywhere near EBITDA.
-   - Exit multiple: default to the SAME as entry (no assumed multiple expansion) unless \
-you have a specific, stated reason to assume otherwise — this is the conservative, \
-defensible convention.
+   - Exit multiple: the BASE CASE always uses the SAME exit multiple as entry — no \
+assumed multiple expansion, ever. This is the conservative, defensible convention and \
+it is what the memo leads with. If you believe expansion is justified, you may model it, \
+but only as a separately labelled UPSIDE case on top of the flat base case (see step 5b). \
+Never present an expanded-exit result as the base case.
    - Hold period: 5 years unless there's a reason to pick something else.
    - Leave operating assumptions (D&A %, capex %, NWC %, tax rate, fees) at the tool's \
 sensible defaults unless the company's data suggests otherwise.
@@ -81,14 +108,47 @@ assuming every dollar of free cash flow pays down debt with no cash cushion reta
 is the more defensible convention.
 4. Call propose_and_run_lbo with those assumptions.
 5. Sanity-check the result. If there are warnings (cash flow shortfall, negative equity) \
-or the IRR is outside a believable ~10-40% range, adjust ONE assumption (usually leverage \
-or entry multiple) and rerun ONCE. Don't iterate more than that — explain the tension \
-instead of hiding it.
+or the IRR is outside a believable ~10-40% range, adjust ONE assumption and rerun ONCE. \
+That adjustment must be to ENTRY MULTIPLE or LEVERAGE — never to the exit multiple. \
+Raising the exit multiple to rescue a return is the single easiest way to make a bad \
+deal look good, and it is exactly what a reader will check first. Don't iterate more \
+than that — explain the tension instead of hiding it. If the flat-multiple base case \
+simply doesn't clear a PE hurdle, SAY SO as the headline finding. That is a legitimate \
+and useful answer, not a failure.
+5b. OPTIONAL upside case: if there is a specific, stated reason multiple expansion could \
+happen, run propose_and_run_lbo once more with the higher exit multiple. This is an \
+UPSIDE SCENARIO, reported after and beneath the base case, and always labelled as \
+assuming expansion from Nx to Mx.
 6. Call run_sensitivity to build an IRR/MOIC grid across exit multiple and leverage.
+6b. Call get_management_discussion with 2-4 topics you actually need explained (e.g. \
+["gross margin", "comparable store sales", "outlook"]). Use what management themselves \
+said to explain WHY the numbers moved. If it comes back unavailable, write the narrative \
+without it and say the qualitative read is not sourced from the filing.
 7. Write a short investment memo (structured like: situation, why it clears a screen, \
 base-case returns, key sensitivities, what you'd want to verify before this goes further) \
 using ONLY numbers that came back from the tools. Do not invent or round-trip numbers \
-from memory.
+from memory. Specifically:
+   - Every fiscal year you cite must carry its period end date if verify_financials \
+flagged the label as ambiguous.
+   - Every discrepancy verify_financials reported must appear in the memo with both values.
+   - Attribute qualitative claims about WHY results moved to management's own discussion, \
+or state plainly that it is your inference. Do not present an inferred explanation as fact.
+   - Attach every dollar figure to the quantity it actually measures. Do not write EBITDA \
+next to the word "cash", or any figure next to a label it does not belong to. A \
+deterministic audit checks this before the file is written and will reject the memo.
+   Structure the memo in this order, and do not deviate:
+     SITUATION -> VERIFICATION NOTE -> SECTOR CONTEXT -> BASE CASE -> UPSIDE CASE \
+(only if you ran one) -> SENSITIVITY -> MANAGEMENT DISCUSSION -> RISKS -> CONCLUSION
+   - The BASE CASE section states the flat-multiple result (exit multiple = entry \
+multiple) and its MOIC and IRR. This is THE headline number of the memo. It appears \
+before any upside case and is what the CONCLUSION leads with.
+   - Any result that relies on a higher exit multiple than entry goes in the UPSIDE CASE \
+section, explicitly labelled, e.g. "Upside case — assumes exit multiple expands from \
+5.0x to 7.0x, which the base case does not assume." A reader must never have to dig \
+through the sensitivity grid to discover that the headline return needed expansion.
+8b. If write_excel_and_memo returns a figure-audit failure, the file was NOT written. \
+Fix every figure it lists and call it again with the corrected memo — do not argue with \
+the audit or repeat the same text.
 8. Call write_excel_and_memo with that memo text to produce the final workbook.
 9. Give the user a short plain-English summary and tell them where the file is.
 
@@ -105,6 +165,56 @@ TOOLS = [
             "type": "object",
             "properties": {"ticker": {"type": "string", "description": "Stock ticker, e.g. SHOE"}},
             "required": ["ticker"],
+        },
+    },
+    {
+        "name": "verify_financials",
+        "description": "Independently cross-check the LTM figures from the last "
+                        "get_company_financials call before they go into a model. Resolves "
+                        "which calendar period a fiscal-year label actually covers (SEC labels "
+                        "a fiscal year by the year it STARTS, which is a full year off from how "
+                        "most data providers label non-December year-ends), compares revenue "
+                        "across alternate XBRL tags, recomputes EBITDA by a second independent "
+                        "path, and checks whether the figure was restated between filings. "
+                        "Returns both numbers and a flag for anything more than ~5% apart. "
+                        "All checks are SEC-sourced, so they cannot detect an error in SEC's own "
+                        "data. Best-effort: may return status 'unavailable'.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_industry_benchmarks",
+        "description": "Look up sector-average EV/EBITDA, EV/EBIT and margins (including "
+                        "EBITDA/Sales) for a US industry, from NYU Stern's Damodaran datasets "
+                        "(free, updated annually). Use this to ground entry/exit multiple "
+                        "assumptions in real sector data. NOTE these are public-market trading "
+                        "multiples for minority stakes, not LBO entry multiples — a control "
+                        "buyout of a small, low-growth company normally prices well below them. "
+                        "If the matched_industry it returns looks wrong, call again with an "
+                        "exact name from available_industries. Best-effort: may return "
+                        "status 'unavailable'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"industry": {"type": "string",
+                                         "description": "Sector name, e.g. 'Retail (Special Lines)' "
+                                                        "or 'specialty retail'"}},
+            "required": ["industry"],
+        },
+    },
+    {
+        "name": "get_management_discussion",
+        "description": "Fetch short excerpts of Management's Discussion & Analysis (Item 7) from "
+                        "the company's latest 10-K, via SEC full-text search. Use it so the memo's "
+                        "qualitative narrative quotes or paraphrases what management actually said "
+                        "drove results, instead of an inferred explanation. Best-effort: may "
+                        "return status 'unavailable' or 'not_found'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topics": {"type": "array", "items": {"type": "string"},
+                            "description": "2-4 phrases to find in the MD&A, e.g. "
+                                           "['gross margin', 'comparable store sales', 'outlook']"},
+            },
+            "required": ["topics"],
         },
     },
     {
@@ -177,6 +287,14 @@ class AgentState:
         self.assumptions: LBOAssumptions | None = None
         self.result = None
         self.sensitivity: dict | None = None
+        self.saved_to: str | None = None
+        self.memo_text: str | None = None
+        self.tool_values: set = set()      # every number any tool returned, for the memo audit
+        self.memo_audit: dict | None = None
+        self.memo_audit_attempts: int = 0
+        self.verification: dict | None = None
+        self.benchmarks: dict | None = None
+        self.mdna: dict | None = None
 
 
 def _assumptions_from_tool_input(inp: dict) -> LBOAssumptions:
@@ -229,6 +347,48 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
             ],
         }
 
+    if name == "verify_financials":
+        if state.company is None:
+            return {"error": "Call get_company_financials first."}
+        year = state.company.latest_complete_year()
+        if year is None:
+            return {"error": "No complete fiscal year to verify."}
+        try:
+            result = verify_financials(
+                state.company.cik, state.company.ticker, year.fy, year.revenue, year.ebitda,
+                year.operating_income, year.d_and_a, year.net_income,
+                year.interest_expense, year.income_tax_expense)
+        except Exception as e:
+            # Verification is a check, not a dependency — never let it kill the run.
+            result = {"status": "unavailable",
+                      "reason": f"{type(e).__name__}: {e}. Proceed, but say in the memo "
+                                f"that the figures could not be cross-checked."}
+        state.verification = result
+        return result
+
+    if name == "get_industry_benchmarks":
+        try:
+            result = get_industry_benchmarks(tool_input["industry"])
+        except Exception as e:
+            result = {"status": "unavailable",
+                      "reason": f"{type(e).__name__}: {e}. Proceed without sector benchmarks."}
+        if result.get("status") == "ok":
+            state.benchmarks = result
+        return result
+
+    if name == "get_management_discussion":
+        if state.company is None:
+            return {"error": "Call get_company_financials first."}
+        try:
+            result = get_management_discussion(state.company.cik, tool_input.get("topics") or [])
+        except Exception as e:
+            result = {"status": "unavailable",
+                      "reason": f"{type(e).__name__}: {e}. Write the narrative without "
+                                f"management's own wording and say so."}
+        if result.get("status") == "ok":
+            state.mdna = result
+        return result
+
     if name == "propose_and_run_lbo":
         if state.ltm_revenue is None or state.ltm_ebitda is None:
             return {"error": "No usable LTM financials yet — call get_company_financials first, "
@@ -272,24 +432,109 @@ def execute_tool(name: str, tool_input: dict, state: AgentState, out_dir: Path) 
     if name == "write_excel_and_memo":
         if state.result is None or state.company is None:
             return {"error": "Need a completed LBO run (propose_and_run_lbo) before writing the file."}
+
+        # Deterministic check that every dollar figure in the prose traces to a tool
+        # result AND sits next to the right label. Blocks the write once so Claude can
+        # correct itself; a second attempt writes anyway, with the findings attached so
+        # a problem is never silently buried in the workbook.
+        audit = audit_memo(
+            tool_input["memo_text"], state.tool_values,
+            build_labelled_values(state.company, state.ltm_revenue, state.ltm_ebitda,
+                                  state.result, state.result.sources_uses))
+        state.memo_audit = audit
+        state.memo_audit_attempts += 1
+        if not audit["clean"] and state.memo_audit_attempts == 1:
+            return {
+                "error": "Memo figure audit failed — file NOT written.",
+                "audit": audit,
+                "guidance": "Fix each figure listed. 'mislabelled' means the number is "
+                            "attached to the wrong quantity (e.g. citing EBITDA as cash) — "
+                            "use the expected value shown. 'untraceable' means no tool "
+                            "returned that number — correct it, or remove the claim. Then "
+                            "call write_excel_and_memo again with the corrected memo.",
+            }
+
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / tool_input["output_filename"]
         wb = build_workbook(state.company, state.ltm_revenue, state.ltm_ebitda,
                              state.assumptions, state.result,
                              sensitivity=state.sensitivity, memo_text=tool_input["memo_text"])
         save_workbook(wb, str(out_path))
-        return {"saved_to": str(out_path)}
+        state.saved_to = str(out_path)
+        state.memo_text = tool_input["memo_text"]
+        return {"saved_to": str(out_path), "memo_audit": audit}
 
     return {"error": f"Unknown tool {name}"}
 
 
-def run_agent(ticker: str, out_dir: Path = Path("output")) -> None:
+def _final_summary(state: AgentState) -> dict:
+    """Serializable snapshot of the run for a UI to render (numbers only, no LLM prose math)."""
+    if state.result is None:
+        # Agent stopped without building a model (bad ticker / not a clean candidate).
+        return {"completed": False,
+                "company": state.company.company_name if state.company else None,
+                "ticker": state.company.ticker if state.company else None,
+                "data_quality_flags": state.company.data_quality_flags if state.company else [],
+                "verification": state.verification}
+    r, su, a = state.result, state.result.sources_uses, state.assumptions
+    return {
+        "completed": True,
+        "company": state.company.company_name,
+        "ticker": state.company.ticker,
+        "ltm_revenue": state.ltm_revenue,
+        "ltm_ebitda": state.ltm_ebitda,
+        "ltm_margin": (state.ltm_ebitda / state.ltm_revenue) if state.ltm_revenue else None,
+        "assumptions": {
+            "entry_ev_multiple": a.entry_ev_multiple,
+            "exit_ev_multiple": a.exit_ev_multiple,
+            "leverage_multiple": a.leverage_multiple,
+            "hold_period_years": a.hold_period_years,
+            "revenue_growth_rate": a.revenue_growth_rate,
+            "cash_sweep_pct": a.cash_sweep_pct,
+        },
+        "entry_ev": su.purchase_enterprise_value,
+        "sponsor_equity": su.sponsor_equity,
+        "exit_equity_value": r.exit_equity_value,
+        "moic": r.sponsor_moic,
+        "irr": r.sponsor_irr,
+        "sources_uses": asdict(su),
+        "exit_ebitda": r.exit_ebitda,
+        "exit_enterprise_value": r.exit_enterprise_value,
+        "exit_net_debt": r.exit_net_debt,
+        # Year-by-year series so a UI can chart the deleveraging without recomputing
+        # anything itself — these are the engine's own numbers, passed straight through.
+        "projections": [
+            {"year": yr.year, "revenue": yr.revenue, "ebitda": yr.ebitda,
+             "levered_fcf_pre_sweep": yr.levered_free_cash_flow_pre_sweep,
+             "cash_swept": yr.cash_swept, "cash_balance_ending": yr.cash_balance_ending,
+             "total_debt_ending": yr.total_debt_ending, "shortfall_flag": yr.shortfall_flag}
+            for yr in r.projections
+        ],
+        "sensitivity": state.sensitivity,
+        "verification": state.verification,
+        "memo_audit": state.memo_audit,
+        "benchmarks": state.benchmarks,
+        "management_discussion": state.mdna,
+        "warnings": r.warnings,
+        "memo_text": state.memo_text,
+        "download": Path(state.saved_to).name if state.saved_to else None,
+    }
+
+
+def iter_agent_events(ticker: str, out_dir: Path = Path("output")):
+    """
+    Run the tool-use loop and YIELD structured events as they happen, instead of
+    printing. This is the single source of truth for both the CLI (run_agent, below)
+    and the web UI (webapp/server.py streams these events over SSE). Every event is a
+    JSON-serializable dict with a "type" field.
+    """
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
     state = AgentState()
     messages = [{"role": "user", "content": f"Build a quick LBO model for {ticker}."}]
 
     total_input_tokens = 0
     total_output_tokens = 0
+    hit_cap = True
 
     for turn in range(MAX_TURNS):
         response = client.messages.create(
@@ -304,32 +549,54 @@ def run_agent(ticker: str, out_dir: Path = Path("output")) -> None:
 
         messages.append({"role": "assistant", "content": response.content})
 
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
-        text_blocks = [b.text for b in response.content if b.type == "text"]
-        if text_blocks:
-            print("\n".join(text_blocks))
+        for b in response.content:
+            if b.type == "text" and b.text.strip():
+                yield {"type": "assistant", "text": b.text}
 
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
         if not tool_uses:
+            hit_cap = False
             break  # Claude gave a final answer with no further tool calls
 
         tool_results = []
         for tu in tool_uses:
-            print(f"  [tool call] {tu.name}({json.dumps(tu.input)[:200]})")
+            yield {"type": "tool_call", "name": tu.name, "input": tu.input}
             result = execute_tool(tu.name, tu.input, state, out_dir)
+            # Every number any tool returned becomes the traceable set the memo audit
+            # checks against. Collected here so it covers all tools automatically.
+            if tu.name != "write_excel_and_memo":
+                collect_values(result, state.tool_values)
+            yield {"type": "tool_result", "name": tu.name, "result": result}
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tu.id,
                 "content": json.dumps(result, default=str),
             })
         messages.append({"role": "user", "content": tool_results})
-    else:
-        print(f"\n[stopped after hitting the {MAX_TURNS}-turn cap — see LBO_AGENT_MAX_TURNS]")
 
-    print(f"\n--- usage this run: {total_input_tokens} input tokens, "
-          f"{total_output_tokens} output tokens ---")
-    print("Check current per-token pricing for your configured model at "
-          "https://docs.claude.com/en/docs/about-claude/models and set a spend "
-          "limit in the Anthropic Console so a run can never surprise-bill you.")
+    if hit_cap:
+        yield {"type": "cap", "max_turns": MAX_TURNS}
+    yield {"type": "usage", "input_tokens": total_input_tokens,
+           "output_tokens": total_output_tokens, "model": MODEL}
+    yield {"type": "done", "summary": _final_summary(state)}
+
+
+def run_agent(ticker: str, out_dir: Path = Path("output")) -> None:
+    """CLI entry point — consumes iter_agent_events and prints it (behavior unchanged)."""
+    for ev in iter_agent_events(ticker, out_dir):
+        t = ev["type"]
+        if t == "assistant":
+            print(ev["text"])
+        elif t == "tool_call":
+            print(f"  [tool call] {ev['name']}({json.dumps(ev['input'])[:200]})")
+        elif t == "cap":
+            print(f"\n[stopped after hitting the {ev['max_turns']}-turn cap — see LBO_AGENT_MAX_TURNS]")
+        elif t == "usage":
+            print(f"\n--- usage this run: {ev['input_tokens']} input tokens, "
+                  f"{ev['output_tokens']} output tokens ---")
+            print("Check current per-token pricing for your configured model at "
+                  "https://docs.claude.com/en/docs/about-claude/models and set a spend "
+                  "limit in the Anthropic Console so a run can never surprise-bill you.")
 
 
 if __name__ == "__main__":
