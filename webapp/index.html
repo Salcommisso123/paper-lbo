@@ -228,7 +228,8 @@
     </section>
 
     <!-- Bottom row -->
-    <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <!-- min-w-0 on each card: without it a wide table stretches its grid column -->
+    <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4 [&>div]:min-w-0">
 
       <!-- Memo -->
       <div id="memo" class="rounded-2xl border border-lime/20 p-5"
@@ -262,10 +263,10 @@
       <!-- Sensitivity -->
       <div id="sensitivity" class="rounded-2xl border border-white/[.06] panel p-5">
         <div class="flex items-center justify-between">
-          <h3 class="text-sm font-semibold">Sensitivity — IRR</h3>
+          <h3 class="text-sm font-semibold">Sensitivity — IRR&nbsp;%</h3>
           <span class="text-[11px] text-muted">exit × leverage</span>
         </div>
-        <div id="sens-body" class="mt-3 overflow-x-auto text-[11px]">
+        <div id="sens-body" class="mt-3 overflow-x-auto text-[10px]">
           <div class="text-muted">No grid yet.</div>
         </div>
       </div>
@@ -441,17 +442,35 @@ function renderSensitivity(s){
   if(!g||!g.irr){ $("sens-body").innerHTML=`<div class="text-muted">The agent didn't run a grid for this deal.</div>`; return; }
   const flat=g.irr.flat().filter(v=>v!=null&&!isNaN(v));
   const lo=Math.min(...flat), hi=Math.max(...flat);
+  // The grid is the widest thing in the bottom row and the agent chooses how many
+  // columns it has. table-fixed + w-full makes the columns share the card evenly so
+  // the last one can never be cut off, and the labels are compact ("6.5x", not
+  // "6.50x") so they still fit once shared.
+  const cols = g.exit_multiples.length + 1;
+  const shortMult=(x)=> x==null||isNaN(x) ? "—" : `${(+x).toFixed(1).replace(/\.0$/,"")}x`;
+  const pad = cols > 6 ? "px-0.5 py-1" : "px-1 py-1.5";
+  // Percent SIGN lives in the card heading, not in 30-odd cells — at 8+ columns it is
+  // the difference between fitting and needing a scrollbar. One decimal matters here
+  // (8.7% vs 9.0% is a real distinction), so drop it only when the grid is very wide.
+  const dp = cols > 8 ? 0 : 1;
   const cell=(v)=>{
-    if(v==null||isNaN(v)) return `<td class="px-2 py-1.5 text-muted">—</td>`;
+    if(v==null||isNaN(v)) return `<td class="${pad} text-center text-muted">—</td>`;
     const t = hi===lo ? .5 : (v-lo)/(hi-lo);
-    return `<td class="px-2 py-1.5 text-center font-medium" style="background:rgba(198,242,78,${(0.06+t*0.42).toFixed(3)});color:${t>0.55?"#0B100D":"#E6ECE7"}">${fmtPct(v)}</td>`;
+    // The fill has to actually get bright before dark text is readable on it. The old
+    // ramp topped out at 48% opacity while switching to dark text at t>0.55 (~29%),
+    // which left the middle of the scale dark-on-dark. Ramp to 68%, and flip the text
+    // only once the fill is past ~50% — the point where it can carry dark type.
+    const alpha = 0.05 + t * 0.63;
+    return `<td class="${pad} text-center font-medium tabular-nums" style="background:rgba(198,242,78,${alpha.toFixed(3)});color:${alpha>0.5?"#0B100D":"#E6ECE7"}">${(v*100).toFixed(dp)}</td>`;
   };
   $("sens-body").innerHTML=`
-    <table class="w-full border-separate" style="border-spacing:2px">
-      <thead><tr><th class="px-2 py-1 text-left font-normal text-muted">lev ↓ / exit →</th>
-        ${g.exit_multiples.map(m=>`<th class="px-2 py-1 font-medium text-muted">${fmtMult(m)}</th>`).join("")}</tr></thead>
+    <table class="w-full table-fixed border-separate" style="border-spacing:1px">
+      <thead><tr>
+        <th class="${pad} text-left font-normal leading-tight text-muted">lev&nbsp;↓<br>exit&nbsp;→</th>
+        ${g.exit_multiples.map(m=>`<th class="${pad} font-medium tabular-nums text-muted">${shortMult(m)}</th>`).join("")}
+      </tr></thead>
       <tbody>${g.leverage_multiples.map((lev,i)=>
-        `<tr><td class="px-2 py-1.5 font-medium text-muted">${fmtMult(lev)}</td>${g.irr[i].map(cell).join("")}</tr>`).join("")}</tbody>
+        `<tr><td class="${pad} font-medium tabular-nums text-muted">${shortMult(lev)}</td>${g.irr[i].map(cell).join("")}</tr>`).join("")}</tbody>
     </table>`;
 }
 function renderResults(s){
