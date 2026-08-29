@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PaperLBO</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink:    { 950: "#080B09", 900: "#0B100D", 850: "#0F1512", 800: "#141B17", 700: "#1B241E" },
+            lime:   { DEFAULT: "#C6F24E", 400: "#D2F771", 600: "#A9D82F", dim: "#7E9E3A" },
+            muted:  "#8B968F",
+            danger: "#F2726D",
+          },
+          fontFamily: {
+            sans: ['ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','Helvetica','Arial','sans-serif'],
+            mono: ['ui-monospace','SFMono-Regular','Menlo','Consolas','monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: rgba(198,242,78,.18); border-radius: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    body { background:
+      radial-gradient(900px 500px at 78% -10%, rgba(198,242,78,.07), transparent 60%),
+      radial-gradient(700px 420px at 5% 105%, rgba(198,242,78,.045), transparent 60%),
+      #080B09; }
+    .panel { background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.012)); }
+    .chartcard { background:
+      radial-gradient(120% 90% at 62% 8%, rgba(198,242,78,.13), transparent 62%),
+      linear-gradient(180deg, #121A14, #0D1310); }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.25} }
+    .pulse { animation: pulse-dot 1.1s ease-in-out infinite; }
+    @keyframes fade-up { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
+    .fade-up { animation: fade-up .28s ease-out both; }
+    .nav-active { background: rgba(198,242,78,.10); color: #D2F771; }
+    input::placeholder { color: #5E6862; }
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+  </style>
+</head>
+<body class="h-full font-sans text-[15px] text-[#E6ECE7] antialiased">
+
+<div class="mx-auto flex min-h-screen max-w-[1500px] gap-4 p-3 sm:p-5">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────── -->
+  <aside class="hidden w-[212px] shrink-0 flex-col rounded-2xl border border-white/[.06] panel p-4 lg:flex">
+    <div class="flex items-center gap-2.5 px-1 pb-6">
+      <div class="grid h-9 w-9 place-items-center rounded-xl bg-lime font-bold text-ink-950 shadow-[0_0_22px_rgba(198,242,78,.35)]">λ</div>
+      <div class="text-[17px] font-semibold tracking-tight">Paper<span class="text-lime">LBO</span></div>
+    </div>
+
+    <nav class="space-y-1 text-sm">
+      <a href="#overview"    class="nav nav-active flex items-center gap-3 rounded-xl px-3 py-2.5 font-medium transition hover:bg-white/[.05]"><span class="text-base">◧</span> Overview</a>
+      <a href="#assumptions" class="nav flex items-center gap-3 rounded-xl px-3 py-2.5 font-medium text-muted transition hover:bg-white/[.05] hover:text-white"><span class="text-base">⚙</span> Assumptions</a>
+      <a href="#memo"        class="nav flex items-center gap-3 rounded-xl px-3 py-2.5 font-medium text-muted transition hover:bg-white/[.05] hover:text-white"><span class="text-base">✎</span> Memo</a>
+      <a href="#reasoning"   class="nav flex items-center gap-3 rounded-xl px-3 py-2.5 font-medium text-muted transition hover:bg-white/[.05] hover:text-white"><span class="text-base">◈</span> Agent log</a>
+      <a href="#outputs"     class="nav flex items-center gap-3 rounded-xl px-3 py-2.5 font-medium text-muted transition hover:bg-white/[.05] hover:text-white"><span class="text-base">≡</span> Model output</a>
+      <a href="#sensitivity" class="nav flex items-center gap-3 rounded-xl px-3 py-2.5 font-medium text-muted transition hover:bg-white/[.05] hover:text-white"><span class="text-base">▦</span> Sensitivity</a>
+    </nav>
+
+    <div class="mt-auto space-y-3 pt-6">
+      <div class="rounded-xl border border-white/[.06] bg-black/20 p-3 text-[11px] leading-relaxed text-muted">
+        Every figure comes from a deterministic, unit-tested Python engine.
+        Claude picks the assumptions and writes the memo — it never computes a
+        number in the model.
+      </div>
+      <div class="flex items-center justify-between px-1 text-[11px] text-muted">
+        <span>Data · SEC EDGAR</span><span id="cost-chip" class="font-mono text-lime-dim"></span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────────────── -->
+  <main class="min-w-0 flex-1 space-y-4">
+
+    <!-- Top bar -->
+    <header class="flex flex-wrap items-center gap-3 rounded-2xl border border-white/[.06] panel px-4 py-3">
+      <div class="flex items-center gap-2.5 lg:hidden">
+        <div class="grid h-8 w-8 place-items-center rounded-lg bg-lime font-bold text-ink-950">λ</div>
+        <span class="font-semibold">Paper<span class="text-lime">LBO</span></span>
+      </div>
+
+      <div id="tagline" class="hidden sm:block">
+        <div class="text-sm font-semibold leading-tight">Autonomous LBO from real filings</div>
+        <div class="text-[11px] leading-tight text-muted">Enter a ticker — the agent does the rest</div>
+      </div>
+
+      <div id="company-chip" class="hidden items-center gap-2.5 rounded-full border border-white/[.07] bg-black/25 py-1.5 pl-1.5 pr-4">
+        <span id="chip-ticker" class="grid h-8 w-8 place-items-center rounded-full bg-lime/15 font-mono text-[11px] font-bold text-lime">—</span>
+        <span class="min-w-0">
+          <span id="chip-name" class="block max-w-[220px] truncate text-sm font-semibold leading-tight">—</span>
+          <span class="block text-[11px] leading-tight text-muted">SEC EDGAR · 10-K</span>
+        </span>
+      </div>
+
+      <div id="ltm-pills" class="hidden flex-wrap items-center gap-2">
+        <div class="rounded-xl border border-white/[.06] bg-black/25 px-3.5 py-2">
+          <div class="flex items-center gap-2 text-[11px] text-muted">LTM revenue</div>
+          <div id="pill-rev" class="text-sm font-semibold">—</div>
+        </div>
+        <div class="rounded-xl border border-white/[.06] bg-black/25 px-3.5 py-2">
+          <div class="flex items-center gap-2 text-[11px] text-muted">LTM EBITDA
+            <span id="pill-margin" class="rounded-md bg-lime/15 px-1.5 py-0.5 font-medium text-lime">—</span>
+          </div>
+          <div id="pill-ebitda" class="text-sm font-semibold">—</div>
+        </div>
+      </div>
+
+      <form id="form" class="ml-auto flex items-center gap-2">
+        <div class="relative">
+          <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted">⌕</span>
+          <input id="ticker" name="ticker" type="text" autocomplete="off" spellcheck="false" placeholder="Ticker"
+                 class="w-[132px] rounded-xl border border-white/[.08] bg-black/30 py-2.5 pl-8 pr-3 font-mono text-sm font-semibold uppercase tracking-widest outline-none transition placeholder:font-sans placeholder:tracking-normal focus:border-lime/50 focus:ring-2 focus:ring-lime/15" />
+        </div>
+        <button id="run" type="submit"
+                class="inline-flex items-center gap-2 rounded-xl bg-lime px-4 py-2.5 text-sm font-semibold text-ink-950 shadow-[0_0_24px_rgba(198,242,78,.25)] transition hover:bg-lime-400 disabled:cursor-not-allowed disabled:opacity-55">
+          <span id="run-label">Build model</span>
+          <svg id="spinner" class="hidden h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+          </svg>
+        </button>
+      </form>
+
+      <div class="flex w-full items-center gap-2 text-[11px] text-muted">
+        <span>Try</span>
+        <button type="button" class="ex rounded-lg border border-white/[.08] px-2 py-1 font-mono font-semibold transition hover:border-lime/50 hover:text-lime">SHOE</button>
+        <button type="button" class="ex rounded-lg border border-white/[.08] px-2 py-1 font-mono font-semibold transition hover:border-lime/50 hover:text-lime">DIN</button>
+        <button type="button" class="ex rounded-lg border border-white/[.08] px-2 py-1 font-mono font-semibold transition hover:border-lime/50 hover:text-lime">FLWS</button>
+        <span class="hidden sm:inline">— FLWS shows the agent refusing to force a model on negative EBITDA.</span>
+      </div>
+    </header>
+
+    <!-- Banner (errors / not-a-candidate) -->
+    <section id="banner" class="hidden"></section>
+
+    <!-- Hero row -->
+    <section id="overview" class="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
+
+      <!-- Chart card -->
+      <div class="chartcard rounded-2xl border border-white/[.06] p-5">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div class="text-sm text-[#A9B6AD]">Exit equity value</div>
+            <div class="mt-1 flex items-center gap-3">
+              <div id="hero-value" class="text-[40px] font-semibold leading-none tracking-tight text-muted">—</div>
+              <span id="hero-pill" class="hidden rounded-lg bg-lime/15 px-2 py-1 text-xs font-semibold text-lime">— MOIC</span>
+            </div>
+            <div id="hero-sub" class="mt-2 text-xs text-muted">Enter a ticker to build a model from real filings.</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div id="series-tabs" class="flex rounded-xl border border-white/[.07] bg-black/25 p-1 text-xs font-medium">
+              <button data-series="debt"    class="tab rounded-lg px-3 py-1.5 text-ink-950" style="background:#C6F24E">Debt</button>
+              <button data-series="ebitda"  class="tab rounded-lg px-3 py-1.5 text-muted transition hover:text-white">EBITDA</button>
+              <button data-series="revenue" class="tab rounded-lg px-3 py-1.5 text-muted transition hover:text-white">Revenue</button>
+            </div>
+            <span id="hold-chip" class="rounded-xl border border-white/[.07] bg-black/25 px-3 py-2 text-xs text-muted">Hold —</span>
+          </div>
+        </div>
+
+        <div class="relative mt-4">
+          <svg id="chart" viewBox="0 0 760 300" class="w-full" style="height:clamp(220px,26vh,300px)"></svg>
+          <div id="chart-empty" class="pointer-events-none absolute inset-0 grid place-items-center text-sm text-muted">
+            No model yet
+          </div>
+        </div>
+      </div>
+
+      <!-- Assumptions / returns panel -->
+      <div id="assumptions" class="rounded-2xl border border-white/[.06] panel p-5">
+        <div class="flex items-center justify-between">
+          <h2 class="font-semibold">Deal assumptions</h2>
+          <span id="assump-src" class="text-[11px] text-muted">chosen by the agent</span>
+        </div>
+
+        <div class="mt-4 grid grid-cols-2 gap-3">
+          <label class="block"><span class="mb-1.5 block text-[11px] text-muted">Entry multiple</span>
+            <output id="a-entry" class="block rounded-xl border border-white/[.07] bg-black/30 px-3 py-2.5 font-mono text-sm">—</output></label>
+          <label class="block"><span class="mb-1.5 block text-[11px] text-muted">Exit multiple</span>
+            <output id="a-exit" class="block rounded-xl border border-white/[.07] bg-black/30 px-3 py-2.5 font-mono text-sm">—</output></label>
+          <label class="block"><span class="mb-1.5 block text-[11px] text-muted">Leverage</span>
+            <output id="a-lev" class="block rounded-xl border border-white/[.07] bg-black/30 px-3 py-2.5 font-mono text-sm">—</output></label>
+          <label class="block"><span class="mb-1.5 block text-[11px] text-muted">Cash sweep</span>
+            <output id="a-sweep" class="block rounded-xl border border-white/[.07] bg-black/30 px-3 py-2.5 font-mono text-sm">—</output></label>
+          <label class="block"><span class="mb-1.5 block text-[11px] text-muted">Revenue growth</span>
+            <output id="a-growth" class="block rounded-xl border border-white/[.07] bg-black/30 px-3 py-2.5 font-mono text-sm">—</output></label>
+          <label class="block"><span class="mb-1.5 block text-[11px] text-muted">Hold period</span>
+            <output id="a-hold" class="block rounded-xl border border-white/[.07] bg-black/30 px-3 py-2.5 font-mono text-sm">—</output></label>
+        </div>
+
+        <a id="download" href="#"
+           class="mt-4 hidden w-full items-center justify-center gap-2 rounded-xl bg-lime px-4 py-3 text-sm font-semibold text-ink-950 shadow-[0_0_24px_rgba(198,242,78,.22)] transition hover:bg-lime-400">
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+          Download Excel model
+        </a>
+        <div id="download-idle" class="mt-4 rounded-xl border border-dashed border-white/[.08] px-4 py-3 text-center text-xs text-muted">
+          The workbook appears here when the run finishes
+        </div>
+
+        <div class="mt-3 grid grid-cols-2 gap-3">
+          <div class="rounded-xl border border-white/[.06] bg-black/30 p-3.5">
+            <div class="text-[11px] text-muted">MOIC</div>
+            <div id="out-moic" class="mt-0.5 text-2xl font-semibold tracking-tight">—</div>
+          </div>
+          <div class="rounded-xl border border-white/[.06] bg-black/30 p-3.5">
+            <div class="text-[11px] text-muted">IRR</div>
+            <div id="out-irr" class="mt-0.5 text-2xl font-semibold tracking-tight">—</div>
+          </div>
+        </div>
+
+        <ul id="warnings" class="mt-3 hidden space-y-1.5 rounded-xl border border-amber-400/25 bg-amber-400/[.07] p-3 text-xs text-amber-200/90"></ul>
+      </div>
+    </section>
+
+    <!-- Bottom row -->
+    <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+
+      <!-- Memo -->
+      <div id="memo" class="rounded-2xl border border-lime/20 p-5"
+           style="background:linear-gradient(180deg,rgba(198,242,78,.10),rgba(198,242,78,.02))">
+        <h3 class="text-sm font-semibold">Investment memo</h3>
+        <p class="mt-1 text-[11px] leading-relaxed text-[#A9B6AD]">One page, written by the agent from the engine's own output.</p>
+        <div id="memo-body" class="mt-3 max-h-56 overflow-y-auto whitespace-pre-wrap rounded-xl bg-black/25 p-3 text-[12px] leading-relaxed text-[#C9D3CB]">
+          <span class="text-muted">Not written yet.</span>
+        </div>
+      </div>
+
+      <!-- Agent log -->
+      <div id="reasoning" class="rounded-2xl border border-white/[.06] panel p-5">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold">Agent reasoning</h3>
+          <span id="live-dot" class="hidden h-2 w-2 rounded-full bg-lime pulse"></span>
+        </div>
+        <div id="log" aria-live="polite" class="mt-3 max-h-56 space-y-2.5 overflow-y-auto pr-1 text-[12px] leading-relaxed">
+          <div class="text-muted">Idle — the live tool-use loop streams here.</div>
+        </div>
+      </div>
+
+      <!-- Model output -->
+      <div id="outputs" class="rounded-2xl border border-white/[.06] panel p-5">
+        <h3 class="text-sm font-semibold">Model output</h3>
+        <div id="out-rows" class="mt-3 space-y-1 text-[12px]">
+          <div class="text-muted">No run yet.</div>
+        </div>
+      </div>
+
+      <!-- Sensitivity -->
+      <div id="sensitivity" class="rounded-2xl border border-white/[.06] panel p-5">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold">Sensitivity — IRR</h3>
+          <span class="text-[11px] text-muted">exit × leverage</span>
+        </div>
+        <div id="sens-body" class="mt-3 overflow-x-auto text-[11px]">
+          <div class="text-muted">No grid yet.</div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="px-1 pb-2 text-[11px] leading-relaxed text-muted">
+      PaperLBO — an autonomous agent that builds a leveraged-buyout model from SEC EDGAR filings.
+      Illustrative only; not investment advice.
+    </footer>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const form=$("form"), input=$("ticker"), runBtn=$("run"), spinner=$("spinner"), runLabel=$("run-label"),
+      log=$("log"), liveDot=$("live-dot"), banner=$("banner");
+let es=null, running=false, t0=0, summary=null, series="debt";
+
+/* ── formatting ─────────────────────────────────────────── */
+const fmtUSD=(n)=>{ if(n==null||isNaN(n)) return "—";
+  const a=Math.abs(n), s=n<0?"-":"";
+  if(a>=1e9) return `${s}$${(a/1e9).toFixed(2)}B`;
+  if(a>=1e6) return `${s}$${(a/1e6).toFixed(1)}M`;
+  return `${s}$${Math.round(a).toLocaleString()}`; };
+const fmtPct =(x)=> x==null||isNaN(x) ? "—" : `${(x*100).toFixed(1)}%`;
+const fmtMult=(x)=> x==null||isNaN(x) ? "—" : `${x.toFixed(2)}x`;
+const esc=(s)=>(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const elapsed=()=>{ const s=Math.floor((Date.now()-t0)/1000);
+  return `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`; };
+
+const TOOL_LABEL = {
+  get_company_financials: "Fetching SEC financials",
+  verify_financials:      "Cross-checking the figures",
+  get_industry_benchmarks:"Pulling sector benchmarks",
+  get_management_discussion: "Reading the 10-K MD&A",
+  propose_and_run_lbo:    "Running the LBO engine",
+  run_sensitivity:        "Building sensitivity grid",
+  write_excel_and_memo:   "Writing Excel workbook",
+};
+
+/* ── agent log ──────────────────────────────────────────── */
+function logRow(inner, cls=""){
+  const el=document.createElement("div");
+  el.className="fade-up flex gap-2.5 "+cls;
+  el.innerHTML=`<span class="shrink-0 font-mono text-[11px] text-muted">${elapsed()}</span><div class="min-w-0 flex-1">${inner}</div>`;
+  log.appendChild(el); log.scrollTop=log.scrollHeight;
+}
+// The agent writes markdown. Escape first, then re-introduce only bold, inline
+// code and bullets — never raw model output as HTML.
+function mdLite(t){
+  return esc(t)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-white">$1</strong>')
+    .replace(/`([^`]+)`/g, '<code class="rounded bg-black/40 px-1 py-0.5 font-mono text-[11px] text-lime-400">$1</code>')
+    .replace(/^[-*] +/gm, '· ');
+}
+const appendAssistant=(t)=>logRow(`<div class="whitespace-pre-wrap text-[#C9D3CB]">${mdLite(t)}</div>`);
+const appendTool=(name,inp)=>logRow(
+  `<div class="flex items-start gap-2 rounded-lg bg-lime/[.08] px-2.5 py-1.5">
+     <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-lime"></span>
+     <span class="font-medium text-lime-400">${esc(TOOL_LABEL[name]||name)}</span>
+     ${inp&&inp.ticker?`<span class="font-mono text-muted">${esc(inp.ticker)}</span>`:""}
+   </div>`);
+const appendNote=(t)=>logRow(`<div class="italic text-muted">${esc(t)}</div>`);
+
+/* ── chart ──────────────────────────────────────────────── */
+const SERIES = {
+  debt:    { label:"Total debt outstanding", key:"total_debt_ending" },
+  ebitda:  { label:"EBITDA",                 key:"ebitda" },
+  revenue: { label:"Revenue",                key:"revenue" },
+};
+function seriesPoints(){
+  if(!summary || !summary.projections || !summary.projections.length) return null;
+  const key=SERIES[series].key;
+  const pts=summary.projections.map(p=>({x:`Y${p.year}`, y:p[key]}));
+  // Year 0 = at close, so the deleveraging curve starts where the deal starts.
+  const y0 = series==="debt"    ? (summary.sources_uses||{}).total_new_debt
+           : series==="ebitda"  ? summary.ltm_ebitda
+           :                      summary.ltm_revenue;
+  if(y0!=null) pts.unshift({x:"Close", y:y0});
+  return pts;
+}
+// Catmull-Rom -> cubic Bezier. Straight segments look jagged on 6 annual points;
+// a mid-tension spline reads as a curve without inventing a shape between years.
+function smoothPath(pts){
+  if(pts.length<2) return "";
+  const t=0.22;
+  let d=`M${pts[0].px},${pts[0].py}`;
+  for(let i=0;i<pts.length-1;i++){
+    const p0=pts[i-1]||pts[i], p1=pts[i], p2=pts[i+1], p3=pts[i+2]||pts[i+1];
+    d+=` C${p1.px+(p2.px-p0.px)*t},${p1.py+(p2.py-p0.py)*t}`
+     +  ` ${p2.px-(p3.px-p1.px)*t},${p2.py-(p3.py-p1.py)*t}`
+     +  ` ${p2.px},${p2.py}`;
+  }
+  return d;
+}
+function drawChart(hoverIdx){
+  const svg=$("chart"), pts=seriesPoints();
+  $("chart-empty").classList.toggle("hidden", !!pts);
+  const W=760,H=300, L=58,R=18,T=18,B=30;
+  if(!pts){   // grid only — an empty frame reads better than a blank rectangle
+    svg.innerHTML=[0,1,2,3,4].map(i=>{ const y=T+i*(H-T-B)/4;
+      return `<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="rgba(255,255,255,.05)"/>`; }).join("");
+    return;
+  }
+
+  const ys=pts.map(p=>p.y);
+  let min=Math.min(...ys), max=Math.max(...ys);
+  if(min===max){ min=min-1; max=max+1; }
+  const pad=(max-min)*0.18; min=Math.max(0,min-pad); max=max+pad;
+  const px=(i)=> L + i*(W-L-R)/Math.max(1,pts.length-1);
+  const py=(v)=> T + (1-(v-min)/(max-min))*(H-T-B);
+  pts.forEach((p,i)=>{ p.px=px(i); p.py=py(p.y); });
+
+  const ticks=4, grid=[], ylab=[];
+  for(let i=0;i<=ticks;i++){
+    const v=min+(max-min)*i/ticks, y=py(v);
+    grid.push(`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="rgba(255,255,255,.05)"/>`);
+    ylab.push(`<text x="${L-10}" y="${y+4}" text-anchor="end" fill="#6F7C74" font-size="11">${fmtUSD(v)}</text>`);
+  }
+  const xlab=pts.map(p=>`<text x="${p.px}" y="${H-8}" text-anchor="middle" fill="#6F7C74" font-size="11">${p.x}</text>`);
+
+  const line=smoothPath(pts);
+  const area=`${line} L${pts[pts.length-1].px},${H-B} L${pts[0].px},${H-B} Z`;
+  const hi = hoverIdx==null ? pts.length-1 : hoverIdx;
+  const h  = pts[hi];
+  const sub = `${SERIES[series].label} · ${h.x}`;
+  const bw = Math.max(112, sub.length*5.4 + 20);   // fit the caption instead of clipping it
+  const bx = Math.min(Math.max(h.px-bw/2, L), W-R-bw);
+
+  svg.innerHTML=`
+    <defs>
+      <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"   stop-color="#C6F24E" stop-opacity=".30"/>
+        <stop offset="100%" stop-color="#C6F24E" stop-opacity="0"/>
+      </linearGradient>
+      <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+        <feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    ${grid.join("")}${ylab.join("")}${xlab.join("")}
+    <path d="${area}" fill="url(#fill)"/>
+    <path d="${line}" fill="none" stroke="#C6F24E" stroke-width="2.5" stroke-linecap="round" filter="url(#glow)"/>
+    <line x1="${h.px}" y1="${T}" x2="${h.px}" y2="${H-B}" stroke="rgba(198,242,78,.35)" stroke-dasharray="4 4"/>
+    <circle cx="${h.px}" cy="${h.py}" r="5" fill="#C6F24E" stroke="#0D1310" stroke-width="2"/>
+    <g transform="translate(${bx},${Math.max(T, h.py-52)})">
+      <rect width="${bw}" height="40" rx="10" fill="#0A0F0C" stroke="rgba(198,242,78,.25)"/>
+      <text x="10" y="17" fill="#E6ECE7" font-size="13" font-weight="600">${fmtUSD(h.y)}</text>
+      <text x="10" y="31" fill="#8B968F" font-size="10">${esc(sub)}</text>
+    </g>
+    ${pts.map((p,i)=>`<rect x="${p.px-16}" y="${T}" width="32" height="${H-T-B}" fill="transparent" data-i="${i}" class="hit" style="cursor:crosshair"/>`).join("")}`;
+  svg.querySelectorAll(".hit").forEach(r=>
+    r.addEventListener("mouseenter",()=>drawChart(+r.dataset.i)));
+  svg.addEventListener("mouseleave",()=>drawChart(null),{once:true});
+}
+document.querySelectorAll("#series-tabs .tab").forEach(b=>b.addEventListener("click",()=>{
+  series=b.dataset.series;
+  document.querySelectorAll("#series-tabs .tab").forEach(o=>{
+    const on=o===b;
+    o.style.background = on ? "#C6F24E" : "transparent";
+    o.className = "tab rounded-lg px-3 py-1.5 transition " + (on ? "text-ink-950" : "text-muted hover:text-white");
+  });
+  drawChart(null);
+}));
+
+/* ── results ────────────────────────────────────────────── */
+function row(label,value,sub){
+  return `<div class="flex items-center justify-between rounded-lg px-2 py-2 transition hover:bg-white/[.04]">
+    <span class="text-muted">${esc(label)}</span>
+    <span class="text-right"><span class="font-semibold">${value}</span>${sub?`<span class="block text-[10px] text-muted">${sub}</span>`:""}</span></div>`;
+}
+function renderSensitivity(s){
+  const g=s.sensitivity;
+  if(!g||!g.irr){ $("sens-body").innerHTML=`<div class="text-muted">The agent didn't run a grid for this deal.</div>`; return; }
+  const flat=g.irr.flat().filter(v=>v!=null&&!isNaN(v));
+  const lo=Math.min(...flat), hi=Math.max(...flat);
+  const cell=(v)=>{
+    if(v==null||isNaN(v)) return `<td class="px-2 py-1.5 text-muted">—</td>`;
+    const t = hi===lo ? .5 : (v-lo)/(hi-lo);
+    return `<td class="px-2 py-1.5 text-center font-medium" style="background:rgba(198,242,78,${(0.06+t*0.42).toFixed(3)});color:${t>0.55?"#0B100D":"#E6ECE7"}">${fmtPct(v)}</td>`;
+  };
+  $("sens-body").innerHTML=`
+    <table class="w-full border-separate" style="border-spacing:2px">
+      <thead><tr><th class="px-2 py-1 text-left font-normal text-muted">lev ↓ / exit →</th>
+        ${g.exit_multiples.map(m=>`<th class="px-2 py-1 font-medium text-muted">${fmtMult(m)}</th>`).join("")}</tr></thead>
+      <tbody>${g.leverage_multiples.map((lev,i)=>
+        `<tr><td class="px-2 py-1.5 font-medium text-muted">${fmtMult(lev)}</td>${g.irr[i].map(cell).join("")}</tr>`).join("")}</tbody>
+    </table>`;
+}
+function renderResults(s){
+  summary=s;
+  banner.classList.add("hidden");
+  $("tagline").style.display="none";
+  $("company-chip").classList.remove("hidden"); $("company-chip").classList.add("flex");
+  $("chip-ticker").textContent = s.ticker || "—";
+  $("chip-name").textContent   = s.company || "—";
+
+  if(!s.completed){
+    const flags=(s.data_quality_flags||[]).map(f=>`<li>⚠ ${esc(f)}</li>`).join("");
+    banner.classList.remove("hidden");
+    banner.innerHTML=`<div class="fade-up rounded-2xl border border-amber-400/30 bg-amber-400/[.07] p-5">
+        <h2 class="font-semibold text-amber-200">Not a clean LBO candidate</h2>
+        <p class="mt-1 text-sm text-amber-100/70">
+          ${s.company?esc(s.company)+" — t":"T"}he agent chose not to force a model. Its reasoning is in the
+          agent log; flagging shaky data instead of dressing it up is the point of the tool.</p>
+        ${flags?`<ul class="mt-3 space-y-1 text-sm text-amber-100/80">${flags}</ul>`:""}
+      </div>`;
+    return;
+  }
+
+  $("ltm-pills").classList.remove("hidden"); $("ltm-pills").classList.add("flex");
+  $("pill-rev").textContent    = fmtUSD(s.ltm_revenue);
+  $("pill-ebitda").textContent = fmtUSD(s.ltm_ebitda);
+  $("pill-margin").textContent = fmtPct(s.ltm_margin);
+
+  $("hero-value").textContent = fmtUSD(s.exit_equity_value);
+  $("hero-value").className   = "text-[40px] font-semibold leading-none tracking-tight";
+  $("hero-pill").textContent  = `${fmtMult(s.moic)} MOIC`;
+  $("hero-pill").classList.remove("hidden");
+  $("hero-sub").textContent   = `${s.company} (${s.ticker}) · sponsor equity ${fmtUSD(s.sponsor_equity)} in, ${fmtUSD(s.exit_equity_value)} out`;
+  $("hold-chip").textContent  = `Hold ${(s.assumptions||{}).hold_period_years ?? "—"} yrs`;
+
+  const a=s.assumptions||{};
+  $("a-entry").textContent  = fmtMult(a.entry_ev_multiple);
+  $("a-exit").textContent   = fmtMult(a.exit_ev_multiple);
+  $("a-lev").textContent    = fmtMult(a.leverage_multiple);
+  $("a-sweep").textContent  = fmtPct(a.cash_sweep_pct);
+  $("a-growth").textContent = fmtPct(a.revenue_growth_rate);
+  $("a-hold").textContent   = (a.hold_period_years ?? "—") + " yrs";
+
+  $("out-moic").textContent = fmtMult(s.moic);
+  $("out-irr").textContent  = fmtPct(s.irr);
+  $("out-irr").className    = "mt-0.5 text-2xl font-semibold tracking-tight " + (s.irr>=0.20?"text-lime":s.irr<0?"text-danger":"");
+
+  const su=s.sources_uses||{};
+  $("out-rows").innerHTML =
+      row("Entry EV", fmtUSD(s.entry_ev), fmtMult(a.entry_ev_multiple)+" LTM EBITDA")
+    + row("New debt", fmtUSD(su.total_new_debt), fmtMult(a.leverage_multiple)+" leverage")
+    + row("Sponsor equity", fmtUSD(s.sponsor_equity))
+    + row("Fees", fmtUSD((su.transaction_fees||0)+(su.financing_fees||0)))
+    + row("Exit EV", fmtUSD(s.exit_enterprise_value), "EBITDA "+fmtUSD(s.exit_ebitda))
+    + row("Exit net debt", fmtUSD(s.exit_net_debt))
+    + row("Exit equity", fmtUSD(s.exit_equity_value), fmtMult(s.moic)+" / "+fmtPct(s.irr));
+
+  // A memo that failed the figure audit was still written (second attempt) — say so
+  // rather than letting it look identical to a clean run.
+  const ma=s.memo_audit;
+  if(ma && ma.clean===false){
+    const items=[...(ma.mislabelled||[]), ...(ma.untraceable||[])]
+      .map(f=>`<li>${esc(f.figure)} — ${esc(f.detail||"")}</li>`).join("");
+    banner.classList.remove("hidden");
+    banner.innerHTML=`<div class="fade-up rounded-2xl border border-amber-400/30 bg-amber-400/[.07] p-4">
+      <h2 class="text-sm font-semibold text-amber-200">Memo figure audit: ${esc(ma.summary||"")}</h2>
+      <ul class="mt-2 space-y-1 text-xs text-amber-100/80">${items}</ul></div>`;
+  }
+
+  const w=(s.warnings||[]);
+  $("warnings").classList.toggle("hidden", !w.length);
+  $("warnings").innerHTML = w.map(x=>`<li>⚠ ${esc(x)}</li>`).join("");
+
+  $("memo-body").innerHTML = s.memo_text ? mdLite(s.memo_text) : `<span class="text-muted">The agent didn't write a memo for this run.</span>`;
+
+  if(s.download){
+    const d=$("download");
+    d.href=`/download/${encodeURIComponent(s.download)}`;
+    d.classList.remove("hidden"); d.classList.add("flex");
+    $("download-idle").classList.add("hidden");
+  }
+
+  renderSensitivity(s);
+  drawChart(null);
+  document.querySelectorAll("#series-tabs .tab")[0].click();
+}
+
+/* ── run lifecycle ──────────────────────────────────────── */
+function setRunning(on){
+  running=on;
+  runBtn.disabled=on;
+  spinner.classList.toggle("hidden",!on);
+  liveDot.classList.toggle("hidden",!on);
+  runLabel.textContent = on ? "Building…" : "Build model";
+}
+function start(){
+  const ticker=input.value.trim().toUpperCase();
+  if(!ticker||running) return;
+  if(es) es.close();
+  t0=Date.now(); summary=null;
+  log.innerHTML=""; banner.classList.add("hidden"); banner.innerHTML="";
+  $("warnings").classList.add("hidden");
+  $("download").classList.add("hidden"); $("download").classList.remove("flex");
+  $("download-idle").classList.remove("hidden");
+  $("memo-body").innerHTML=`<span class="text-muted">Not written yet.</span>`;
+  $("out-rows").innerHTML=`<div class="text-muted">Running…</div>`;
+  $("sens-body").innerHTML=`<div class="text-muted">Running…</div>`;
+  $("cost-chip").textContent="";
+  $("tagline").style.display="none";
+  $("company-chip").classList.remove("hidden"); $("company-chip").classList.add("flex");
+  $("chip-ticker").textContent=ticker; $("chip-name").textContent="Fetching filings…";
+  drawChart(null);
+  setRunning(true);
+
+  es=new EventSource(`/api/stream?ticker=${encodeURIComponent(ticker)}`);
+  es.onmessage=(e)=>{
+    let ev; try{ ev=JSON.parse(e.data); }catch{ return; }
+    switch(ev.type){
+      case "assistant":  appendAssistant(ev.text); break;
+      case "tool_call":  appendTool(ev.name, ev.input); break;
+      case "tool_result": break;  // the assistant narrates these already
+      case "cap":        appendNote(`Stopped at the ${ev.max_turns}-turn safety cap.`); break;
+      case "usage": {
+        const cost = ev.cost_usd!=null ? ` · ≈ $${ev.cost_usd.toFixed(3)}` : "";
+        appendNote(`${ev.input_tokens.toLocaleString()} in / ${ev.output_tokens.toLocaleString()} out tokens on ${ev.model}${cost}`);
+        if(ev.cost_usd!=null) $("cost-chip").textContent=`≈ $${ev.cost_usd.toFixed(3)}/run`;
+        break;
+      }
+      case "done":  es.close(); setRunning(false); renderResults(ev.summary); break;
+      case "error":
+        es.close(); setRunning(false);
+        appendNote("Error: "+ev.message);
+        banner.classList.remove("hidden");
+        banner.innerHTML=`<div class="fade-up rounded-2xl border border-danger/30 bg-danger/[.08] p-4 text-sm text-red-200">
+          <span class="font-semibold">Run failed.</span> ${esc(ev.message)}</div>`;
+        break;
+    }
+  };
+  // A normal end-of-stream (or a network drop) fires onerror. We always end the run
+  // here so EventSource never silently reconnects and re-runs the agent.
+  es.onerror=()=>{
+    if(!running) return;           // already finished cleanly via "done"
+    es.close(); setRunning(false);
+    appendNote("Connection closed before the run finished.");
+  };
+}
+form.addEventListener("submit",(e)=>{ e.preventDefault(); start(); });
+document.querySelectorAll(".ex").forEach(b=>b.addEventListener("click",()=>{
+  input.value=b.textContent; if(!running) start();
+}));
+document.querySelectorAll(".nav").forEach(a=>a.addEventListener("click",()=>{
+  document.querySelectorAll(".nav").forEach(o=>{
+    o.classList.remove("nav-active");
+    if(o!==a) o.classList.add("text-muted");
+  });
+  a.classList.add("nav-active"); a.classList.remove("text-muted");
+}));
+drawChart(null);
+input.focus();
+</script>
+</body>
+</html>
