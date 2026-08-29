@@ -14,7 +14,9 @@ one-page investment memo.
 
 *A real run: ticker in, the agent's reasoning streaming live, and a finished model —
 deleveraging curve, the assumptions it chose and defended, returns, an IRR sensitivity
-grid, the memo, and the Excel workbook.*
+grid, the memo, and the Excel workbook. The headline is always the flat-multiple **base
+case** (exit multiple = entry); a run assuming multiple expansion is labelled as an
+upside case and never shown as the top-line return.*
 
 Built as a portfolio project for private equity recruiting. It automates
 what PE firms call a "paper LBO" — a standard interview screen — end to end:
